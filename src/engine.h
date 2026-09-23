@@ -27,6 +27,7 @@ struct FrameInputs
     float zoneFogDistance;
     float farClip;
     bool inLiquid;
+    int mapId;
 };
 
 namespace engine

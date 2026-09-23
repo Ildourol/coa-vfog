@@ -2,6 +2,7 @@
 // state restoration, depth linearisation, viewport clipping and Reset. Writes PNG captures to --out.
 #include "config.h"
 #include "engine.h"
+#include "fog_data.h"
 #include "fog_model.h"
 
 #include <windows.h>
@@ -431,6 +432,7 @@ FrameInputs MakeInputs(const float* view, const float* proj, Vec3 eye, Vec3 at, 
     in.zoneFogDistance = 600.0f;
     in.farClip = kFar;
     in.inLiquid = false;
+    in.mapId = -1;
     return in;
 }
 
@@ -441,9 +443,10 @@ float SmoothStep(float e0, float e1, float x)
 }
 
 // CPU transmittance of the march for one pixel of a sky ray (no occluders, shafts disabled).
-float ReferenceSkyTransmittance(const FrameInputs& in, const Config& cfg, float px, float py, int steps, float jitter)
+float ReferenceSkyTransmittance(const FrameInputs& in, const Config& cfg, const AuthoredFog* authored, float px,
+                                float py, int steps, float jitter)
 {
-    FogParams fog = BuildFogParams(in, cfg);
+    FogParams fog = BuildFogParams(in, cfg, authored);
     const float* P = in.proj;
     const D3DVIEWPORT9& vp = in.viewport;
     float ndcX = (px - vp.X) / vp.Width * 2.0f - 1.0f;
@@ -467,23 +470,81 @@ float ReferenceSkyTransmittance(const FrameInputs& in, const Config& cfg, float 
         float dt = tb - ta;
         float t = ta + (tb - ta) * jitter;
         float h = in.camPos[2] + dirW.z * t;
-        for (int i = 0; i < 3; ++i)
+        auto clamp01 = [](float x) { return std::fmin(std::fmax(x, 0.0f), 1.0f); };
+        for (const FogLayer& l : fog.layers)
         {
-            const FogLayer& l = fog.layers[i];
-            float scale = i == 2 ? std::exp(-std::fmax(dirW.z, 0.0f) * fog.farSkyFalloff) *
-                                       std::fmin(std::fmax((fog.farLimit - ta) / std::fmax(dt, 1e-3f), 0.0f), 1.0f)
-                                 : 1.0f;
-            float cover = std::fmin(std::fmax((t - l.start) / std::fmax(dt, 1e-3f), 0.0f), 1.0f);
+            float scale = std::exp(-std::fmax(dirW.z, 0.0f) * l.skyFalloff);
+            float cover = clamp01((t - l.start) / std::fmax(dt, 1e-3f)) * clamp01((l.limit - ta) / std::fmax(dt, 1e-3f));
             float curve = 1.0f + l.strength * std::pow(std::fmin(t / fog.maxDistance, 1.0f) + 1e-6f, l.exponent);
-            float heightF = std::fmin(std::exp((l.heightBase - h) * l.heightFalloff), 1.0f);
+            float heightF = std::fmin(std::exp((l.upperHeight - h) * l.upperFalloff), 1.0f) *
+                            std::fmin(std::exp((h - l.lowerHeight) * l.lowerFalloff), 1.0f);
             tau += l.density * scale * dt * cover * curve * heightF;
         }
     }
     return static_cast<float>(std::exp(-tau));
 }
 
-int Run(const std::wstring& outDir)
+const AuthoredLayer* FarWall(const AuthoredFog& fog)
 {
+    for (int i = 0; i < fog.layerCount; ++i)
+        if (fog.layers[i].start >= 1000.0f)
+            return &fog.layers[i];
+    return nullptr;
+}
+
+const AuthoredLayer* MidHaze(const AuthoredFog& fog)
+{
+    for (int i = 0; i < fog.layerCount; ++i)
+        if (fog.layers[i].start < 1.0f && std::fabs(fog.layers[i].g - 0.5f) < 0.01f)
+            return &fog.layers[i];
+    return nullptr;
+}
+
+float WeightOf(const AuthoredFog& fog, uint32_t light)
+{
+    for (int i = 0; i < fog.lightCount; ++i)
+        if (fog.lightIds[i] == light)
+            return fog.lightWeights[i];
+    return 0.0f;
+}
+
+void CheckClassicData(const FogData& data)
+{
+    // Stormwind harbour, 18:00: Classic light 1 (params 7748) with the edge of light 77 (params 7472).
+    const float harbour[3] = {-8565.21f, 993.46f, 104.96f};
+    AuthoredFog fog = {};
+    bool ok = data.Resolve(0, harbour, 0.75f, 0, fog);
+    float w1 = WeightOf(fog, 1);
+    float w77 = WeightOf(fog, 77);
+    const AuthoredLayer* wall = FarWall(fog);
+    const AuthoredLayer* haze = MidHaze(fog);
+    std::printf("     harbour at 18:00: lights 1:%.3f 77:%.3f, %d layers, far wall density %.4f, haze density %.4f\n",
+                w1, w77, fog.layerCount, wall ? wall->density : -1.0f, haze ? haze->density : -1.0f);
+    Check(ok && fog.layerCount == 3 && std::fabs(w1 + w77 - 1.0f) < 1e-4f && w77 > 0.05f && w77 < 0.1f,
+          "Classic light blend at the harbour (light 77 falloff edge)");
+    Check(wall && haze && std::fabs(wall->start - 3000.0f) < 0.5f &&
+              std::fabs(wall->density - (w1 * 0.6f + w77 * 0.1f)) < 1e-4f &&
+              std::fabs(haze->density - (w1 * 0.12f + w77 * 0.1f)) < 1e-4f,
+          "Classic layers blended by light weight at a key time");
+
+    AuthoredFog mid = {};
+    data.Resolve(0, harbour, 2250.0f / 2880.0f, 0, mid);
+    float expected = WeightOf(mid, 1) * 0.8f + WeightOf(mid, 77) * 0.3f;
+    const AuthoredLayer* midWall = FarWall(mid);
+    std::printf("     harbour at 18:45: far wall density %.4f (expected %.4f)\n", midWall ? midWall->density : -1.0f,
+                expected);
+    Check(midWall && std::fabs(midWall->density - expected) < 1e-4f, "Classic keys interpolated between 18:00 and 19:30");
+
+    AuthoredFog none = {};
+    Check(!data.Resolve(530, harbour, 0.75f, 0, none), "maps without Classic lights fall back to derived layers");
+}
+
+int Run(const std::wstring& outDir, const std::string& dataPath)
+{
+    FogData classic;
+    Check(classic.Load(dataPath), "Classic fog data loads");
+    CheckClassicData(classic);
+
     CreateDirectoryW(outDir.c_str(), nullptr);
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
@@ -553,7 +614,7 @@ int Run(const std::wstring& outDir)
     float view[16];
 
     Config cfg = {};
-    cfg.maxDistance = 1500.0f;
+    cfg.maxDistance = 5000.0f;
     vf_test_set_config(&cfg);
 
     Image before;
@@ -649,9 +710,9 @@ int Run(const std::wstring& outDir)
         return img;
     };
 
-    Image radiance = renderDebug(1, 1500.0f);
+    Image radiance = renderDebug(1, 5000.0f);
     SavePng(outDir + L"\\debug-radiance.png", radiance.w, radiance.h, radiance.bgra);
-    Image transmittance = renderDebug(2, 1500.0f);
+    Image transmittance = renderDebug(2, 5000.0f);
     SavePng(outDir + L"\\debug-transmittance.png", transmittance.w, transmittance.h, transmittance.bgra);
 
     {
@@ -660,7 +721,7 @@ int Run(const std::wstring& outDir)
         vf_test_set_config(&c);
         Config saved = cfg;
         cfg = c;
-        Image t = renderDebug(2, 1500.0f);
+        Image t = renderDebug(2, 5000.0f);
         cfg = saved;
         LookAt(eye, at, view);
         FrameInputs in = MakeInputs(view, proj, eye, at, world);
@@ -672,7 +733,7 @@ int Run(const std::wstring& outDir)
             float hi = 0.0f;
             for (int j = 0; j < 16; ++j)
             {
-                float r = ReferenceSkyTransmittance(in, c, s[0] + 0.5f, s[1] + 0.5f, 24, (j + 0.5f) / 16.0f);
+                float r = ReferenceSkyTransmittance(in, c, nullptr, s[0] + 0.5f, s[1] + 0.5f, 24, (j + 0.5f) / 16.0f);
                 lo = std::fmin(lo, r);
                 hi = std::fmax(hi, r);
             }
@@ -739,6 +800,54 @@ int Run(const std::wstring& outDir)
         vf_test_set_config(&cfg);
     }
 
+    {
+        Config c = cfg;
+        c.lightShafts = false;
+        c.godRays = 0.0f;
+        c.temporal = 0.0f;
+        c.dataMode = 1;
+        LookAt(eye, at, view);
+        FrameInputs in = MakeInputs(view, proj, eye, at, world);
+        in.mapId = 0;
+        AuthoredFog authored = {};
+        bool resolved = classic.Resolve(0, in.camPos, in.dayFraction, 0, authored);
+        c.debugView = 2;
+        vf_test_set_config(&c);
+        h.BeginFrame();
+        h.DrawScene(eye, view, proj, world);
+        vf_test_render(&in, &skip);
+        Image t = Capture(h.dev);
+        h.dev->EndScene();
+        c.debugView = 0;
+        vf_test_set_config(&c);
+        h.BeginFrame();
+        h.DrawScene(eye, view, proj, world);
+        vf_test_render(&in, &skip);
+        Image classicImage = Capture(h.dev);
+        h.dev->EndScene();
+        SavePng(outDir + L"\\after-classic.png", classicImage.w, classicImage.h, classicImage.bgra);
+        bool match = resolved;
+        const UINT samples[3][2] = {{101, 101}, {1181, 101}, {101, 201}};
+        for (const auto& s : samples)
+        {
+            float lo = 1.0f;
+            float hi = 0.0f;
+            for (int j = 0; j < 16; ++j)
+            {
+                float r = ReferenceSkyTransmittance(in, c, resolved ? &authored : nullptr, s[0] + 0.5f, s[1] + 0.5f, 24,
+                                                    (j + 0.5f) / 16.0f);
+                lo = std::fmin(lo, r);
+                hi = std::fmax(hi, r);
+            }
+            float got = t.At(s[0], s[1])[2] / 255.0f;
+            std::printf("     Classic sky transmittance at %u,%u: shader %.3f, reference %.3f..%.3f\n", s[0], s[1], got,
+                        lo, hi);
+            match = match && got > lo - 0.02f && got < hi + 0.02f;
+        }
+        Check(match, "Classic-layer sky transmittance matches the CPU reference");
+        vf_test_set_config(&cfg);
+    }
+
     Image depthView = renderDebug(3, 255.0f);
     SavePng(outDir + L"\\debug-depth.png", depthView.w, depthView.h, depthView.bgra);
     {
@@ -801,8 +910,17 @@ int Run(const std::wstring& outDir)
 int wmain(int argc, wchar_t** argv)
 {
     std::wstring out = L"harness-out";
+    std::string data = "fogdata.bin";
     for (int i = 1; i + 1 < argc; ++i)
+    {
         if (std::wcscmp(argv[i], L"--out") == 0)
             out = argv[i + 1];
-    return Run(out);
+        if (std::wcscmp(argv[i], L"--data") == 0)
+        {
+            char path[MAX_PATH] = {};
+            WideCharToMultiByte(CP_ACP, 0, argv[i + 1], -1, path, MAX_PATH, nullptr, nullptr);
+            data = path;
+        }
+    }
+    return Run(out, data);
 }

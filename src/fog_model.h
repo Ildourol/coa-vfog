@@ -2,8 +2,9 @@
 
 #include "config.h"
 #include "engine.h"
+#include "fog_data.h"
 
-// One fog layer in shader order: four float4 registers (see vf_march.hlsl AccumulateLayer).
+// One fog layer in shader order: six float4 registers (see AccumulateLayer in vf_march.hlsl).
 struct FogLayer
 {
     float start;
@@ -14,16 +15,26 @@ struct FogLayer
     float strength;
     float diffuse[3];
     float exponent;
-    float heightBase;
-    float heightFalloff;
-    float shadowed;
+    float upperHeight;
+    float upperFalloff;
+    float lowerHeight;
+    float lowerFalloff;
+    float shadowEmissive[3];
     float shadowDensity;
+    float shadowed;
+    // Sky rays only: density scales by exp(-skyFalloff * max(dir.z, 0)), leaving a horizon band.
+    float skyFalloff;
+    // Distance beyond which the layer stops accumulating.
+    float limit;
+    float unused;
 };
+
+constexpr int kFogLayers = 4;
 
 struct FogParams
 {
-    // Haze, ground mist, and the distance fog that stands in for the stock fog.
-    FogLayer layers[3];
+    // Three scene layers (Classic-authored or derived) and the distance fog that replaces the stock fog.
+    FogLayer layers[kFogLayers];
     float lightColor[3];
     float rayColor[3];
     float lightVisibility;
@@ -31,14 +42,13 @@ struct FogParams
     float horizonStart;
     float farClip;
     float referenceZ;
-    // Sky rays only: the distance fog fades with ray elevation as exp(-k * dir.z), leaving a horizon band.
-    float farSkyFalloff;
-    // The distance fog stops accumulating beyond this distance.
     float farLimit;
+    bool linear;
+    bool authored;
 };
 
 void UnpackColor(uint32_t argb, float* rgb);
-FogParams BuildFogParams(const FrameInputs& in, const Config& cfg);
+FogParams BuildFogParams(const FrameInputs& in, const Config& cfg, const AuthoredFog* authored);
 
 void Mul4x4(const float* a, const float* b, float* out);
 bool Invert4x4(const float* m, float* out);

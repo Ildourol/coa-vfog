@@ -77,6 +77,8 @@ void ConfigStore::Read()
     c.groundFog = ReadFloat(p, "GroundFog", c.groundFog, 0.0f, 10.0f);
     c.farFog = ReadFloat(p, "FarFog", c.farFog, 0.0f, 10.0f);
     c.stockFog = ReadInt(p, "StockFog", c.stockFog, 0, 1);
+    c.dataMode = ReadInt(p, "DataMode", c.dataMode, 0, 1);
+    c.colorSpace = ReadInt(p, "ColorSpace", c.colorSpace, 0, 1);
     c.sunScatter = ReadFloat(p, "SunScatter", c.sunScatter, 0.0f, 10.0f);
     c.ambient = ReadFloat(p, "Ambient", c.ambient, 0.0f, 10.0f);
     c.exposure = ReadFloat(p, "Exposure", c.exposure, 0.0f, 10.0f);

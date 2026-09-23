@@ -49,6 +49,7 @@ add_library(CoAVolFog SHARED
     src/d3d9_wrap.cpp
     src/dllmain.cpp
     src/engine.cpp
+    src/fog_data.cpp
     src/fog_model.cpp
     src/hooks.cpp
     src/log.cpp
@@ -64,15 +65,15 @@ add_library(version SHARED proxy/version_proxy.cpp proxy/version.def)
 target_link_libraries(version PRIVATE CoAVolFog)
 target_compile_definitions(version PRIVATE WIN32_LEAN_AND_MEAN)
 
-add_executable(vfog_harness tests/harness.cpp src/fog_model.cpp)
+add_executable(vfog_harness tests/harness.cpp src/fog_data.cpp src/fog_model.cpp src/log.cpp)
 target_include_directories(vfog_harness PRIVATE src)
 target_compile_definitions(vfog_harness PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(vfog_harness PRIVATE CoAVolFog user32 ole32 windowscodecs)
-add_custom_command(TARGET vfog_harness POST_BUILD
+add_custom_command(TARGET CoAVolFog POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/CoAVolFog.ini
-            $<TARGET_FILE_DIR:vfog_harness>/CoAVolFog.ini)
+            ${CMAKE_CURRENT_SOURCE_DIR}/data/fogdata.bin $<TARGET_FILE_DIR:CoAVolFog>)
 
 enable_testing()
 add_test(NAME vfog_harness
-    COMMAND vfog_harness --out ${CMAKE_CURRENT_BINARY_DIR}/harness-out
+    COMMAND vfog_harness --out ${CMAKE_CURRENT_BINARY_DIR}/harness-out --data ${CMAKE_CURRENT_SOURCE_DIR}/data/fogdata.bin
     WORKING_DIRECTORY $<TARGET_FILE_DIR:vfog_harness>)

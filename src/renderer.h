@@ -2,6 +2,7 @@
 
 #include "config.h"
 #include "engine.h"
+#include "fog_data.h"
 
 #include <d3d9.h>
 
@@ -26,6 +27,7 @@ private:
     bool EnsureStateBlock(IDirect3DDevice9* dev);
     bool EnsureTargets(IDirect3DDevice9* dev, UINT lowW, UINT lowH, UINT rayW, UINT rayH);
     bool Skip(const char* reason);
+    void LogLightChange(const FrameInputs& in, const AuthoredFog& fog, bool authored);
     void DrawFullscreen(IDirect3DDevice9* dev);
     void BindTexture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseTexture9* tex, bool linear);
     bool RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DSurface9* target,
@@ -59,5 +61,7 @@ private:
     long long m_prevTicks = 0;
     unsigned m_frame = 0;
     unsigned m_logged = 0;
+    bool m_lightsLogged = false;
+    uint32_t m_lightSignature = 0;
     const char* m_skip = "";
 };

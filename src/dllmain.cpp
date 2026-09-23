@@ -1,6 +1,7 @@
 #include "config.h"
 #include "d3d9_wrap.h"
 #include "engine.h"
+#include "fog_data.h"
 #include "hooks.h"
 #include "log.h"
 
@@ -26,6 +27,7 @@ void Attach(HMODULE module)
     LogOpen((dir + "CoAVolFog.log").c_str());
     const Config& cfg = GlobalConfig().Get();
     VF_LOG_INFO("CoAVolFog loaded from %s", dir.c_str());
+    GlobalFogData().Load(dir + "fogdata.bin");
 
     if (!engine::IsSupportedClient())
     {

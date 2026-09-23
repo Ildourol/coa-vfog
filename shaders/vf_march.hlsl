@@ -6,12 +6,12 @@
 #define STEPS 24
 #endif
 #define SHADOW_STEPS 6
+#define LAYER_REGS 6
 
 float4 cToLight  : register(c9);   // xyz toward-light direction (view space), w = light visibility
 float4 cShadow   : register(c10);  // x = min step (yd), y = step per yard of distance, z = enabled, w = thickness in steps
 float4 cMarch    : register(c11);  // x = jitter, y = distance-curve range, z = horizon blend start, w = far clip
-float4 cLayer[12] : register(c12); // three layers of four float4, see FogLayer in fog_model.h
-float4 cFar      : register(c24);  // x = sky-ray elevation falloff of the distance layer, y = its end distance
+float4 cLayer[24] : register(c12); // four layers of six float4, see FogLayer in fog_model.h
 
 sampler2D sDepth : register(s0);
 
@@ -46,15 +46,26 @@ float SunVisibility(float3 p, float t, float jitter)
     return vis;
 }
 
-void AccumulateLayer(float4 l0, float4 l1, float4 l2, float4 l3, float phase, float scale, float t, float dt,
-                     float h, float vis, inout float3 src, inout float tau)
+// Layer registers: L0 (start, density, g, isotropic), L1 (emissive, strength), L2 (diffuse, exponent),
+// L3 (upper height, upper falloff, lower height, lower falloff), L4 (shadow emissive, shadow density),
+// L5 (shadowed, sky falloff, limit, -).
+void AccumulateLayer(int b, float phase, float scale, float ta, float t, float dt, float h, float vis,
+                     inout float3 src, inout float tau)
 {
-    float cover = saturate((t - l0.x) / max(dt, 1e-3));
+    float4 l0 = cLayer[b];
+    float4 l1 = cLayer[b + 1];
+    float4 l2 = cLayer[b + 2];
+    float4 l3 = cLayer[b + 3];
+    float4 l4 = cLayer[b + 4];
+    float4 l5 = cLayer[b + 5];
+    float cover = saturate((t - l0.x) / max(dt, 1e-3)) * saturate((l5.z - ta) / max(dt, 1e-3));
     float curve = 1 + l1.w * pow(saturate(t / cMarch.y) + 1e-6, l2.w);
-    float heightF = saturate(exp((l3.x - h) * l3.y));
-    float lit = lerp(1, vis, l3.z);
-    float e = l0.y * scale * dt * cover * curve * heightF * lerp(1, lerp(l3.w, 1, vis), l3.z);
-    src += (l2.rgb * (lit * phase) + l1.rgb) * e;
+    float heightF = saturate(exp((l3.x - h) * l3.y)) * saturate(exp((h - l3.z) * l3.w));
+    float shadowed = l5.x;
+    float lit = lerp(1, vis, shadowed);
+    float e = l0.y * scale * dt * cover * curve * heightF * lerp(1, lerp(l4.w, 1, vis), shadowed);
+    float3 emissive = lerp(l1.rgb, lerp(l4.rgb, l1.rgb, vis), shadowed);
+    src += (l2.rgb * (lit * phase) + emissive) * e;
     tau += e;
 }
 
@@ -73,10 +84,18 @@ float4 main(float2 vpos : VPOS) : COLOR0
     float3 camW = cInvView[3].xyz;
     float3 dirW = mul(V, (float3x3)cInvView);
     float cosT = dot(cToLight.xyz, V);
-    float phase0 = lerp(PhaseHG(cLayer[0].z, cosT), 1, cLayer[0].w);
-    float phase1 = lerp(PhaseHG(cLayer[4].z, cosT), 1, cLayer[4].w);
-    float phase2 = lerp(PhaseHG(cLayer[8].z, cosT), 1, cLayer[8].w);
-    float farScale = d >= cDepthLin.w ? exp(-max(dirW.z, 0) * cFar.x) : 1;
+    float sky = d >= cDepthLin.w ? 1 : 0;
+    float up = max(dirW.z, 0);
+
+    float phase[4];
+    float scale[4];
+    [unroll] for (int i = 0; i < 4; i++)
+    {
+        float4 l0 = cLayer[i * LAYER_REGS];
+        float4 l5 = cLayer[i * LAYER_REGS + 5];
+        phase[i] = lerp(PhaseHG(l0.z, cosT), 1, l0.w);
+        scale[i] = sky > 0 ? exp(-up * l5.y) : 1;
+    }
 
     float3 L = 0;
     float T = 1;
@@ -95,10 +114,8 @@ float4 main(float2 vpos : VPOS) : COLOR0
             vis = SunVisibility(V * t, t, jitter);
         float3 src = 0;
         float tau = 0;
-        AccumulateLayer(cLayer[0], cLayer[1], cLayer[2], cLayer[3], phase0, 1, t, dt, h, vis, src, tau);
-        AccumulateLayer(cLayer[4], cLayer[5], cLayer[6], cLayer[7], phase1, 1, t, dt, h, vis, src, tau);
-        float farPart = saturate((cFar.y - ta) / max(dt, 1e-3));
-        AccumulateLayer(cLayer[8], cLayer[9], cLayer[10], cLayer[11], phase2, farScale * farPart, t, dt, h, vis, src, tau);
+        [unroll] for (int j = 0; j < 4; j++)
+            AccumulateLayer(j * LAYER_REGS, phase[j], scale[j], ta, t, dt, h, vis, src, tau);
         [branch] if (tau > 1e-6)
         {
             float tr = exp(-tau);

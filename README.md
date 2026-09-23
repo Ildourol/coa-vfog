@@ -2,9 +2,26 @@
 
 Volumetric fog and light shafts for the Ascension/CoA 3.3.5a (build 12340) Direct3D 9 client.
 
-It implements the first playable slice of the `coa-vfog-kit` plan: the development loader, the D3D9
-device wrapper with a readable depth buffer, the world-render hooks, and the per-pixel ray-march tier
-with layers derived from the client's live day/night lighting.
+It implements the `coa-vfog-kit` plan's loader, D3D9 device wrapper with a readable depth buffer,
+world-render hooks and per-pixel ray-march tier. Fog layers come from the Classic client's own
+`LightDataGlobalVolumeFog` data wherever its lights cover the map, and are derived from the 3.3.5
+day/night lighting elsewhere (Outland, Northrend, custom maps).
+
+## Classic fog data
+
+`tools/convert_classic_fog.py` converts the kit's Classic `Light`, `LightData` and
+`LightDataGlobalVolumeFog` exports into `data/fogdata.bin` (625 lights, 2,079 time keys, 5,737 layers):
+
+```powershell
+python tools/convert_classic_fog.py <path>\coa-vfog-kit.zip data/fogdata.bin
+```
+
+At run time the DLL blends the Classic lights around the camera (spheres: full weight inside the
+falloff start, linear to the falloff end, the map's global light takes the rest), interpolates the two
+time keys around the current time, pairs layers by their layer index, and applies the Classic transforms:
+density ×0.01, heights relative to the player when flag bit 1 is set, sun shadowing for flag bit 0,
+`1 + strength·(d/range)^exponent` over a 5,000-yd fog range, and scatter intensities up to 10 in linear
+light with a soft highlight roll-off. The data is Classic-derived; keep it in private repositories.
 
 ## What it draws
 
@@ -73,7 +90,9 @@ through the same entry the hook uses, and checks:
 - device wrapping, INTZ substitution, pure-device removal and preserved engine-visible parameters;
 - restoration of render, sampler, texture, shader, constant, stream, viewport, scissor and target state;
 - pixels outside the world viewport (the glow sub-rectangle case) left untouched;
-- linear depth against the scene geometry, and sky transmittance against a CPU reference integration;
+- linear depth against the scene geometry, and sky transmittance against a CPU reference integration
+  for derived and Classic layers;
+- Classic light blending and time-key interpolation at a known position against hand-computed values;
 - temporal accumulation converging on a static camera;
 - Reset at a new size and reference counts reaching zero.
 
@@ -81,7 +100,8 @@ It writes `before.png`, `after.png` and the debug views to `build/harness-out`.
 
 ## Install
 
-Close the client, then copy `version.dll`, `CoAVolFog.dll` and `CoAVolFog.ini` next to `Ascension.exe`.
+Close the client, then copy `version.dll`, `CoAVolFog.dll`, `CoAVolFog.ini` and `fogdata.bin` next to
+`Ascension.exe`.
 Remove `version.dll` and `CoAVolFog.dll` to uninstall; nothing else in the client is changed. The DLL
 writes `CoAVolFog.log` next to itself.
 
@@ -96,10 +116,12 @@ writes `CoAVolFog.log` next to itself.
 | `Quality` | 2 | 1 quarter resolution / 16 steps, 2 half / 24, 3 half / 32 |
 | `Density`, `Haze`, `GroundFog`, `FarFog` | 1, 1, 0.6, 1 | Density multipliers |
 | `StockFog` | 1 | 1 replaces the stock fog with the distance fog, 0 keeps it |
+| `DataMode` | 1 | 1 Classic layers where available, 0 derived layers everywhere |
+| `ColorSpace` | 1 | 1 linear light with highlight roll-off, 0 gamma |
 | `SunScatter`, `Ambient`, `Exposure` | 1, 1, 1 | Light in the fog |
 | `LightShafts` | 1 | Shadowed in-scattering |
 | `GodRays` | 0.35 | Radial sky rays, 0 = off |
-| `MaxDistance` | 1500 | Sky column length in yards |
+| `MaxDistance` | 5000 | Fog range: sky integration length and the Classic distance-curve scale |
 | `Temporal` | 0.85 | History weight, 0 = off |
 | `Underwater` | 0 | Keep the effect under water |
 | `DebugView` | 0 | 1 radiance, 2 transmittance, 3 linear depth |
@@ -116,5 +138,7 @@ writes `CoAVolFog.log` next to itself.
 - Transparent effects, particles and water are fogged by the opaque depth behind them (kit IP-B), so
   near effects in front of the sky are dimmed slightly.
 - Interiors get the outdoor layers; the `gxApi d3d9ex` path is not wrapped (fog stays off there).
-- Not implemented from the kit: the froxel pipeline (M3), Classic-authored layer data (M5),
-  fitted fog for transparents (M6), in-game CVars.
+- Water does not write depth, so distant water is fogged by what lies behind it (sea floor or sky).
+- Classic data covers the lights the Classic `Light` table references (slot 0, clear weather); zone
+  lights, weather/underwater/death slots and noise modulation are not used yet.
+- Not implemented from the kit: the froxel pipeline (M3), fitted fog for transparents (M6), in-game CVars.

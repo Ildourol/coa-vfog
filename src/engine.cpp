@@ -21,6 +21,7 @@ constexpr uintptr_t kProjectionGlobal = 0x00ADF628;
 constexpr uintptr_t kCameraPosition = 0x00CD8F5C;
 constexpr uintptr_t kCameraTarget = 0x00CD8F68;
 constexpr uintptr_t kCameraInLiquid = 0x00CD8794;
+constexpr uintptr_t kCurrentMap = 0x00AB63BC;
 constexpr uintptr_t kWorldFrame = 0x00B7436C;
 constexpr uintptr_t kWorldFrameFarClip = 0xB14;
 
@@ -147,6 +148,7 @@ bool BuildFrameInputsUnsafe(FrameInputs& out)
     out.directColor = Read<uint32_t>(kDirectColor);
     out.ambientColor = Read<uint32_t>(kAmbientColor);
     out.inLiquid = CameraInLiquid();
+    out.mapId = Read<int32_t>(kCurrentMap);
 
     out.zoneFogDistance = Read<float>(kZoneFogDistance);
     out.farClip = out.proj[14] / (1.0f - out.proj[10]);

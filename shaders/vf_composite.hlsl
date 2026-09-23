@@ -1,13 +1,20 @@
 // Depth-aware upsample of the low-res fog onto the world viewport. Blend: ONE, INVSRCALPHA.
 #include "vf_common.hlsli"
 
-float4 cComposite : register(c9);   // x = exposure, y = god-ray strength, z = debug view, w = 0
+float4 cComposite : register(c9);   // x = exposure, y = god-ray strength, z = debug view, w = linear fog radiance
 float4 cRayColor  : register(c10);  // rgb = god-ray colour
 float4 cSunPx     : register(c11);  // xy = sun position in render-target pixels, z = sun marker enabled
 
 sampler2D sDepth : register(s0);
 sampler2D sFog   : register(s1);
 sampler2D sRays  : register(s2);
+
+// Rolls highlights above the knee off toward 1 so HDR scattering (intensities up to 10) stays in range.
+float3 Shoulder(float3 x)
+{
+    const float knee = 0.6;
+    return x <= knee ? x : knee + (1 - knee) * (1 - exp(-(x - knee) / (1 - knee)));
+}
 
 float4 main(float2 vpos : VPOS) : COLOR0
 {
@@ -32,6 +39,11 @@ float4 main(float2 vpos : VPOS) : COLOR0
     }
     float4 fog = acc / wsum;
     fog.rgb *= cComposite.x;
+    [branch] if (cComposite.w > 0)
+    {
+        float a = max(fog.a, 1e-4);
+        fog.rgb = pow(Shoulder(fog.rgb / a), 1.0 / 2.2) * fog.a;
+    }
 
     float3 rays = 0;
     [branch] if (cComposite.y > 0)
