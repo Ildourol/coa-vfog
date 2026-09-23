@@ -10,6 +10,8 @@ struct Config
     float density = 1.0f;
     float haze = 1.0f;
     float groundFog = 0.6f;
+    float farFog = 1.0f;
+    int stockFog = 1;
     float sunScatter = 1.0f;
     float ambient = 1.0f;
     float exposure = 1.0f;

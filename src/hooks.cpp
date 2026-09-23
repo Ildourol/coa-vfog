@@ -13,9 +13,16 @@ namespace
 {
 using GetProcAddressFn = FARPROC(WINAPI*)(HMODULE, LPCSTR);
 
+constexpr float kStockFogAway = 50000.0f;
+
+uintptr_t g_worldRenderTarget = engine::kWorldRenderTarget;
 uintptr_t g_opaqueDoneTarget = engine::kOpaqueDoneTarget;
 uintptr_t g_worldDoneTarget = engine::kWorldDoneTarget;
 bool g_failed = false;
+bool g_renderedLastFrame = false;
+bool g_renderedThisFrame = false;
+bool g_stockFogPushed = false;
+engine::StockFog g_savedStockFog = {};
 bool g_deviceChecked = false;
 unsigned g_skipsLogged = 0;
 DWORD g_lastReload = 0;
@@ -53,6 +60,35 @@ FogDevice* GameFogDevice()
     return device;
 }
 
+// The volumetric fog replaces the stock fog only while it is actually drawing, so a frame it
+// skips keeps the client's own fog.
+void OnFrameBegin()
+{
+    g_renderedThisFrame = false;
+    const Config& cfg = GlobalConfig().Get();
+    if (g_failed || !g_renderedLastFrame || cfg.stockFog != 1 || engine::CameraInLiquid() || !GameFogDevice())
+        return;
+    g_savedStockFog = engine::ReadStockFog();
+    engine::StockFog pushed;
+    for (int i = 0; i < 2; ++i)
+    {
+        pushed.start[i] = kStockFogAway;
+        pushed.end[i] = kStockFogAway * 2.0f;
+    }
+    engine::WriteStockFog(pushed);
+    g_stockFogPushed = true;
+}
+
+void OnFrameEnd()
+{
+    if (g_stockFogPushed)
+    {
+        engine::WriteStockFog(g_savedStockFog);
+        g_stockFogPushed = false;
+    }
+    g_renderedLastFrame = g_renderedThisFrame;
+}
+
 void OnOpaqueDone()
 {
     FogDevice* device = g_failed ? nullptr : GameFogDevice();
@@ -87,6 +123,7 @@ void OnWorldDone()
         rendered = RenderFog(device, in, cfg, &skip);
     else if (valid)
         skip = "camera under liquid";
+    g_renderedThisFrame = rendered;
     if (!rendered && skip != g_lastSkip && g_skipsLogged < 50)
     {
         ++g_skipsLogged;
@@ -131,6 +168,30 @@ bool SiteMatches(uintptr_t site, uintptr_t expectedTarget)
 }
 }
 
+extern "C" void __cdecl vf_on_frame_begin()
+{
+    __try
+    {
+        OnFrameBegin();
+    }
+    __except (GuardFilter(GetExceptionCode(), "frame begin hook"))
+    {
+        g_failed = true;
+    }
+}
+
+extern "C" void __cdecl vf_on_frame_end()
+{
+    __try
+    {
+        OnFrameEnd();
+    }
+    __except (GuardFilter(GetExceptionCode(), "frame end hook"))
+    {
+        g_failed = true;
+    }
+}
+
 extern "C" void __cdecl vf_on_opaque_done()
 {
     __try
@@ -152,6 +213,21 @@ extern "C" void __cdecl vf_on_world_done()
     __except (GuardFilter(GetExceptionCode(), "world hook"))
     {
         g_failed = true;
+    }
+}
+
+// 0x4FB03D: the world render, thiscall on the world frame with no stack arguments.
+__declspec(naked) static void WorldRenderThunk()
+{
+    __asm {
+        push ecx
+        call vf_on_frame_begin
+        pop ecx
+        call dword ptr [g_worldRenderTarget]
+        pushad
+        call vf_on_frame_end
+        popad
+        ret
     }
 }
 
@@ -179,6 +255,16 @@ __declspec(naked) static void WorldDoneThunk()
     }
 }
 
+namespace
+{
+struct CallSite
+{
+    uintptr_t site;
+    uintptr_t target;
+    const void* thunk;
+};
+}
+
 bool InstallEngineHooks()
 {
     auto* slot = reinterpret_cast<GetProcAddressFn*>(engine::kGetProcAddressSlot);
@@ -189,22 +275,33 @@ bool InstallEngineHooks()
                      static_cast<unsigned>(current), static_cast<unsigned>(engine::kGetProcAddressThunk));
         return false;
     }
-    if (!SiteMatches(engine::kOpaqueDoneSite, engine::kOpaqueDoneTarget) ||
-        !SiteMatches(engine::kWorldDoneSite, engine::kWorldDoneTarget))
+    const CallSite sites[] = {
+        {engine::kWorldRenderSite, engine::kWorldRenderTarget, &WorldRenderThunk},
+        {engine::kOpaqueDoneSite, engine::kOpaqueDoneTarget, &OpaqueDoneThunk},
+        {engine::kWorldDoneSite, engine::kWorldDoneTarget, &WorldDoneThunk},
+    };
+    for (const CallSite& s : sites)
+        if (!SiteMatches(s.site, s.target))
+        {
+            VF_LOG_ERROR("world render call site 0x%08X differs from the 12340 client; hooks not installed",
+                         static_cast<unsigned>(s.site));
+            return false;
+        }
+    int patched = 0;
+    for (const CallSite& s : sites)
     {
-        VF_LOG_ERROR("world render call sites differ from the 12340 client; hooks not installed");
-        return false;
-    }
-    if (!PatchCallSite(engine::kOpaqueDoneSite, engine::kOpaqueDoneTarget, &OpaqueDoneThunk))
-        return false;
-    if (!PatchCallSite(engine::kWorldDoneSite, engine::kWorldDoneTarget, &WorldDoneThunk))
-    {
-        PatchCallSite(engine::kOpaqueDoneSite, reinterpret_cast<uintptr_t>(&OpaqueDoneThunk),
-                      reinterpret_cast<const void*>(engine::kOpaqueDoneTarget));
-        return false;
+        if (!PatchCallSite(s.site, s.target, s.thunk))
+        {
+            while (patched-- > 0)
+                PatchCallSite(sites[patched].site, reinterpret_cast<uintptr_t>(sites[patched].thunk),
+                              reinterpret_cast<const void*>(sites[patched].target));
+            return false;
+        }
+        ++patched;
     }
     *slot = &GetProcAddressFilter;
-    VF_LOG_INFO("engine hooks installed: GetProcAddress filter, opaque 0x%08X, world 0x%08X",
-                static_cast<unsigned>(engine::kOpaqueDoneSite), static_cast<unsigned>(engine::kWorldDoneSite));
+    VF_LOG_INFO("engine hooks installed: GetProcAddress filter, world render 0x%08X, opaque 0x%08X, world done 0x%08X",
+                static_cast<unsigned>(engine::kWorldRenderSite), static_cast<unsigned>(engine::kOpaqueDoneSite),
+                static_cast<unsigned>(engine::kWorldDoneSite));
     return true;
 }

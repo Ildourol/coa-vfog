@@ -467,11 +467,16 @@ float ReferenceSkyTransmittance(const FrameInputs& in, const Config& cfg, float 
         float dt = tb - ta;
         float t = ta + (tb - ta) * jitter;
         float h = in.camPos[2] + dirW.z * t;
-        for (const FogLayer& l : fog.layers)
+        for (int i = 0; i < 3; ++i)
         {
+            const FogLayer& l = fog.layers[i];
+            float scale = i == 2 ? std::exp(-std::fmax(dirW.z, 0.0f) * fog.farSkyFalloff) *
+                                       std::fmin(std::fmax((fog.farLimit - ta) / std::fmax(dt, 1e-3f), 0.0f), 1.0f)
+                                 : 1.0f;
             float cover = std::fmin(std::fmax((t - l.start) / std::fmax(dt, 1e-3f), 0.0f), 1.0f);
+            float curve = 1.0f + l.strength * std::pow(std::fmin(t / fog.maxDistance, 1.0f) + 1e-6f, l.exponent);
             float heightF = std::fmin(std::exp((l.heightBase - h) * l.heightFalloff), 1.0f);
-            tau += l.density * dt * cover * heightF;
+            tau += l.density * scale * dt * cover * curve * heightF;
         }
     }
     return static_cast<float>(std::exp(-tau));
@@ -676,6 +681,28 @@ int Run(const std::wstring& outDir)
             match = match && got > lo - 0.02f && got < hi + 0.02f;
         }
         Check(match, "sky transmittance matches the CPU reference (world-space reconstruction)");
+
+        UINT farRow = 0;
+        float farZ = 0.0f;
+        for (UINT py = 0; py < 688 && !farRow; ++py)
+        {
+            float ndcY = 1.0f - (py + 0.5f) / 688.0f * 2.0f;
+            Vec3 ray = {0.0f, ndcY / proj[5], 1.0f};
+            float dz = ray.y * view[9] + ray.z * view[10];
+            float z = dz < 0.0f ? -(eye.z - kWorldOffset.z) / dz : 1e9f;
+            if (z < 0.9f * in.fogEnd)
+            {
+                farRow = py;
+                farZ = z;
+            }
+        }
+        float farT = t.At(640, farRow)[2] / 255.0f;
+        std::printf("     ground at %.0f yd (row %u, stock fog end %.0f): transmittance %.3f\n", farZ, farRow, in.fogEnd,
+                    farT);
+        Check(farRow && farT < 0.15f, "distance fog hides terrain where the stock fog it replaces turns opaque");
+        float highSky = t.At(640, 20)[2] / 255.0f;
+        std::printf("     sky near the top of the view: transmittance %.3f\n", highSky);
+        Check(highSky > 0.5f, "distance fog leaves the upper sky visible");
     }
 
     {

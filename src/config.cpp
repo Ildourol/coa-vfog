@@ -58,9 +58,10 @@ bool ConfigStore::ReloadIfChanged()
     Read();
     m_config.enable = enable;
     m_config.hooks = hooks;
-    VF_LOG_INFO("config reloaded: density=%.2f haze=%.2f ground=%.2f sun=%.2f rays=%.2f quality=%d debug=%d",
-                m_config.density, m_config.haze, m_config.groundFog, m_config.sunScatter, m_config.godRays,
-                m_config.quality, m_config.debugView);
+    VF_LOG_INFO("config reloaded: density=%.2f haze=%.2f ground=%.2f far=%.2f stockfog=%d sun=%.2f rays=%.2f "
+                "quality=%d debug=%d",
+                m_config.density, m_config.haze, m_config.groundFog, m_config.farFog, m_config.stockFog,
+                m_config.sunScatter, m_config.godRays, m_config.quality, m_config.debugView);
     return true;
 }
 
@@ -74,6 +75,8 @@ void ConfigStore::Read()
     c.density = ReadFloat(p, "Density", c.density, 0.0f, 10.0f);
     c.haze = ReadFloat(p, "Haze", c.haze, 0.0f, 10.0f);
     c.groundFog = ReadFloat(p, "GroundFog", c.groundFog, 0.0f, 10.0f);
+    c.farFog = ReadFloat(p, "FarFog", c.farFog, 0.0f, 10.0f);
+    c.stockFog = ReadInt(p, "StockFog", c.stockFog, 0, 1);
     c.sunScatter = ReadFloat(p, "SunScatter", c.sunScatter, 0.0f, 10.0f);
     c.ambient = ReadFloat(p, "Ambient", c.ambient, 0.0f, 10.0f);
     c.exposure = ReadFloat(p, "Exposure", c.exposure, 0.0f, 10.0f);

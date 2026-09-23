@@ -36,6 +36,8 @@ constexpr uint32_t kClientTimestamp = 0x4C2452FE;
 constexpr uintptr_t kGetProcAddressSlot = 0x00B2ED98;
 constexpr uintptr_t kGetProcAddressThunk = 0x0041C654;
 
+constexpr uintptr_t kWorldRenderSite = 0x004FB03D;
+constexpr uintptr_t kWorldRenderTarget = 0x004F8EA0;
 constexpr uintptr_t kOpaqueDoneSite = 0x004F911D;
 constexpr uintptr_t kOpaqueDoneTarget = 0x00823CB0;
 constexpr uintptr_t kWorldDoneSite = 0x004F9281;
@@ -43,6 +45,16 @@ constexpr uintptr_t kWorldDoneTarget = 0x008C1010;
 
 bool IsSupportedClient();
 void* GameD3DDevice();
+bool CameraInLiquid();
+
+// The stock fog's start/end in both DayNight fog groups, which the render callbacks read per draw.
+struct StockFog
+{
+    float start[2];
+    float end[2];
+};
+StockFog ReadStockFog();
+void WriteStockFog(const StockFog& fog);
 
 // Called right after the opaque M2 pass: records the world viewport and the bound matrices.
 void CaptureOpaqueState(IDirect3DDevice9* device);

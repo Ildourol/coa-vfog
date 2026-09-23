@@ -11,12 +11,15 @@ with layers derived from the client's live day/night lighting.
 - **Distance haze** that thickens toward the horizon and fades with altitude, tinted by the zone's
   stock fog colour.
 - **Ground mist** that hugs the terrain around the player; zones with short stock fog get more.
+- **Distance fog** that replaces the stock linear fog: it turns opaque where the stock fog did, is lit by
+  the direct light (warm at sunset), and fades into a horizon band on the sky.
 - **Forward scattering** around the sun or moon (Henyey–Greenstein phase).
 - **Light shafts**: in-scattering is shadowed by a screen-space march toward the light, so trees,
   buildings and terrain cast shafts into the fog.
 - **God rays** (optional): a radial blur of the bright sky around the sun.
 
-The stock 3.3.5a fog stays on; the effect is composited over the world before glow and the UI.
+The effect is composited over the world before glow and the UI. While it draws, the stock fog is pushed
+out of range for the world render and restored afterwards; a frame the effect skips keeps the stock fog.
 
 ## How it attaches
 
@@ -25,21 +28,22 @@ The stock 3.3.5a fog stays on; the effect is composited over the world before gl
 | Loader | `version.dll` proxy (all 17 exports forward lazily to the system copy). Its static import loads `CoAVolFog.dll` before the client starts. |
 | D3D9 | The client resolves `Direct3DCreate9` through the delay-loaded `GetProcAddress` slot `[0xB2ED98]`. The DLL points that slot at a filter that returns a wrapped `IDirect3D9`. No d3d9 code is patched, so DXVK or other `d3d9.dll` builds keep working underneath. |
 | Depth | The wrapper creates the device without auto depth and binds an `INTZ` texture as the depth-stencil, which the client caches as its world depth. MSAA is reported unavailable and forced off; `D3DCREATE_PUREDEVICE` is removed. |
-| Hooks | Two 5-byte call displacements in the world render `0x4F8EA0`: after the opaque M2 pass (`0x4F911D`, records the world viewport and matrices) and before the frame effects (`0x4F9281`, renders the fog). The original bytes are checked first; on any mismatch nothing is patched. |
+| Hooks | Three 5-byte call displacements: the world render call (`0x4FB03D`, stock-fog override and restore), after the opaque M2 pass (`0x4F911D`, records the world viewport and matrices) and before the frame effects (`0x4F9281`, renders the fog). The original bytes are checked first; on any mismatch nothing is patched. |
 | State | Every state the passes touch is captured with a recorded state block and restored, plus render targets, depth and stream 0 (whose offset state blocks drop). The client's shader-constant cache stays valid. |
 
 Engine inputs (all static addresses in the 12340 image):
 
 | Input | Address |
 |---|---|
-| World view / projection (OpenGL depth range, converted by the D3D backend) | device `+0x1B00` stack, `+0xF88`; copies at `0xADF5E8`, `0xADF628` |
+| World view / projection (camera-relative view; OpenGL depth range, converted by the D3D backend) | device `+0x1B00` stack, `+0xF88`; copies at `0xADF5E8`, `0xADF628` |
 | Camera position / look-at target | `0xCD8F5C`, `0xCD8F68` |
 | Day fraction | `0xD38B04` |
-| Final fog colour / start / end | `0xD38BA0`, `0xD38BA4`, `0xD38BA8` |
+| Stock fog groups: colour, start, end (read by the render callbacks) | `0xD38B8C`–`0xD38B94`, `0xD38BA0`–`0xD38BA8` |
+| Zone fog distance (light float band 0) | `0xD38C1C` |
 | Light colours: ambient, direct, sun | `0xD38BD4`, `0xD38BD8`, `0xD38BF8` |
 | Visible sun / moon sprite positions, sky centre | `0xD38E28`, `0xD38E48`, `0xD38B18` (day window `[0xA41CA4, 0xA41CA0]`) |
 | Camera in liquid | `0xCD8794` |
-| Far clip | `[[0xB7436C] + 0xB14]` |
+| Far clip | From the projection; `[[0xB7436C] + 0xB14]` as a fallback |
 
 Two readings in the kit were corrected against the disassembly: the fog end is `0xD38BA8` (the kit's
 `0xD38B98` is a density-like value that Extensions.dll patches), and `0xD38C9C` is a near-constant model
@@ -90,7 +94,8 @@ writes `CoAVolFog.log` next to itself.
 | `Enable` | 1 | Master switch (restart) |
 | `EngineHooks` | 1 | Install the hooks; 0 leaves the client unmodified (restart) |
 | `Quality` | 2 | 1 quarter resolution / 16 steps, 2 half / 24, 3 half / 32 |
-| `Density`, `Haze`, `GroundFog` | 1, 1, 0.6 | Density multipliers |
+| `Density`, `Haze`, `GroundFog`, `FarFog` | 1, 1, 0.6, 1 | Density multipliers |
+| `StockFog` | 1 | 1 replaces the stock fog with the distance fog, 0 keeps it |
 | `SunScatter`, `Ambient`, `Exposure` | 1, 1, 1 | Light in the fog |
 | `LightShafts` | 1 | Shadowed in-scattering |
 | `GodRays` | 0.35 | Radial sky rays, 0 = off |
@@ -103,11 +108,11 @@ writes `CoAVolFog.log` next to itself.
 
 ## Status and limits
 
-- Verified offline only (harness above). It has not yet run inside the client, so the in-client items
-  of kit milestone M0 remain open: Extensions.dll's anti-tamper reaction to the proxy and patches,
-  the camera/sun projections on screen, and INTZ support on the target GPUs, DXVK and Wine.
-- The local server runs with `Warden.Enabled = 1`. Extensions.dll reports "injected DLLs" through
-  opcode `0x51F`; the server logs and stores such alerts and disconnects after more than 5 in 10 s.
+- First in-client run (2026-09-23, native D3D9, 2560x1440): hooks, wrapper and INTZ worked, and the
+  server recorded no anticheat alerts (`player_anticheat_alert` empty) with `Warden.Enabled = 1`.
+  That run exposed the camera-relative view, now covered by the harness. DXVK and Wine are untested.
+- Extensions.dll can report "injected DLLs" through opcode `0x51F`; the server logs and stores such
+  alerts and disconnects after more than 5 in 10 s.
 - Transparent effects, particles and water are fogged by the opaque depth behind them (kit IP-B), so
   near effects in front of the sky are dimmed slightly.
 - Interiors get the outdoor layers; the `gxApi d3d9ex` path is not wrapped (fog stays off there).

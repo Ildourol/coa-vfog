@@ -18,7 +18,7 @@
 
 namespace
 {
-constexpr UINT kPixelConstants = 24;
+constexpr UINT kPixelConstants = 25;
 constexpr DWORD kStages = 3;
 constexpr UINT kRayScale = 4;
 constexpr float kSkyDepth = 0.9999995f;
@@ -422,9 +422,10 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
                     in.dayFraction, in.lightIsMoon ? "moon" : "sun", in.toLight[0], in.toLight[1], in.toLight[2],
                     toLightV[0], toLightV[1], toLightV[2], fog.lightVisibility, sunPx[0], sunPx[1], rayStrength);
         VF_LOG_INFO("  fog %08X start %.1f end %.1f zone %.1f sun %08X direct %08X ambient %08X refZ %.1f haze %.6f "
-                    "ground %.6f",
+                    "ground %.6f far %.6f",
                     in.fogColor, in.fogStart, in.fogEnd, in.zoneFogDistance, in.sunColor, in.directColor,
-                    in.ambientColor, fog.referenceZ, fog.layers[0].density, fog.layers[1].density);
+                    in.ambientColor, fog.referenceZ, fog.layers[0].density, fog.layers[1].density,
+                    fog.layers[2].density);
     }
 
     dev->SetDepthStencilSurface(nullptr);
@@ -456,7 +457,9 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
         {1.0f, fog.maxDistance, fog.horizonStart, fog.farClip},
     };
     dev->SetPixelShaderConstantF(9, &march[0].x, 3);
-    dev->SetPixelShaderConstantF(12, &fog.layers[0].start, 8);
+    const Float4 distanceFog = {fog.farSkyFalloff, fog.farLimit, 0.0f, 0.0f};
+    dev->SetPixelShaderConstantF(12, &fog.layers[0].start, 12);
+    dev->SetPixelShaderConstantF(24, &distanceFog.x, 1);
     BindTexture(dev, 0, depthTexture, false);
     DrawFullscreen(dev);
 

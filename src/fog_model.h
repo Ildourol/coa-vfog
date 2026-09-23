@@ -22,7 +22,8 @@ struct FogLayer
 
 struct FogParams
 {
-    FogLayer layers[2];
+    // Haze, ground mist, and the distance fog that stands in for the stock fog.
+    FogLayer layers[3];
     float lightColor[3];
     float rayColor[3];
     float lightVisibility;
@@ -30,6 +31,10 @@ struct FogParams
     float horizonStart;
     float farClip;
     float referenceZ;
+    // Sky rays only: the distance fog fades with ray elevation as exp(-k * dir.z), leaving a horizon band.
+    float farSkyFalloff;
+    // The distance fog stops accumulating beyond this distance.
+    float farLimit;
 };
 
 void UnpackColor(uint32_t argb, float* rgb);

@@ -10,7 +10,8 @@
 float4 cToLight  : register(c9);   // xyz toward-light direction (view space), w = light visibility
 float4 cShadow   : register(c10);  // x = min step (yd), y = step per yard of distance, z = enabled, w = thickness in steps
 float4 cMarch    : register(c11);  // x = jitter, y = distance-curve range, z = horizon blend start, w = far clip
-float4 cLayer[8] : register(c12);  // two layers of four float4, see FogLayer in fog_model.h
+float4 cLayer[12] : register(c12); // three layers of four float4, see FogLayer in fog_model.h
+float4 cFar      : register(c24);  // x = sky-ray elevation falloff of the distance layer, y = its end distance
 
 sampler2D sDepth : register(s0);
 
@@ -45,14 +46,14 @@ float SunVisibility(float3 p, float t, float jitter)
     return vis;
 }
 
-void AccumulateLayer(float4 l0, float4 l1, float4 l2, float4 l3, float phase, float t, float dt, float h,
-                     float vis, inout float3 src, inout float tau)
+void AccumulateLayer(float4 l0, float4 l1, float4 l2, float4 l3, float phase, float scale, float t, float dt,
+                     float h, float vis, inout float3 src, inout float tau)
 {
     float cover = saturate((t - l0.x) / max(dt, 1e-3));
     float curve = 1 + l1.w * pow(saturate(t / cMarch.y) + 1e-6, l2.w);
     float heightF = saturate(exp((l3.x - h) * l3.y));
     float lit = lerp(1, vis, l3.z);
-    float e = l0.y * dt * cover * curve * heightF * lerp(1, lerp(l3.w, 1, vis), l3.z);
+    float e = l0.y * scale * dt * cover * curve * heightF * lerp(1, lerp(l3.w, 1, vis), l3.z);
     src += (l2.rgb * (lit * phase) + l1.rgb) * e;
     tau += e;
 }
@@ -63,7 +64,8 @@ float4 main(float2 vpos : VPOS) : COLOR0
     float3 ray = ViewRay(pc);
     float rayLen = length(ray);
     float3 V = ray / rayLen;
-    float z = LinearDepth(SampleDepth(sDepth, pc));
+    float d = SampleDepth(sDepth, pc);
+    float z = LinearDepth(d);
     z = lerp(z, cDepthLin.z, smoothstep(cMarch.z, cMarch.w, z));
     float tMax = min(z * rayLen, cDepthLin.z);
 
@@ -73,6 +75,8 @@ float4 main(float2 vpos : VPOS) : COLOR0
     float cosT = dot(cToLight.xyz, V);
     float phase0 = lerp(PhaseHG(cLayer[0].z, cosT), 1, cLayer[0].w);
     float phase1 = lerp(PhaseHG(cLayer[4].z, cosT), 1, cLayer[4].w);
+    float phase2 = lerp(PhaseHG(cLayer[8].z, cosT), 1, cLayer[8].w);
+    float farScale = d >= cDepthLin.w ? exp(-max(dirW.z, 0) * cFar.x) : 1;
 
     float3 L = 0;
     float T = 1;
@@ -91,8 +95,10 @@ float4 main(float2 vpos : VPOS) : COLOR0
             vis = SunVisibility(V * t, t, jitter);
         float3 src = 0;
         float tau = 0;
-        AccumulateLayer(cLayer[0], cLayer[1], cLayer[2], cLayer[3], phase0, t, dt, h, vis, src, tau);
-        AccumulateLayer(cLayer[4], cLayer[5], cLayer[6], cLayer[7], phase1, t, dt, h, vis, src, tau);
+        AccumulateLayer(cLayer[0], cLayer[1], cLayer[2], cLayer[3], phase0, 1, t, dt, h, vis, src, tau);
+        AccumulateLayer(cLayer[4], cLayer[5], cLayer[6], cLayer[7], phase1, 1, t, dt, h, vis, src, tau);
+        float farPart = saturate((cFar.y - ta) / max(dt, 1e-3));
+        AccumulateLayer(cLayer[8], cLayer[9], cLayer[10], cLayer[11], phase2, farScale * farPart, t, dt, h, vis, src, tau);
         [branch] if (tau > 1e-6)
         {
             float tr = exp(-tau);

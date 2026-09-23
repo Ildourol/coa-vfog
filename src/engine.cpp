@@ -24,6 +24,9 @@ constexpr uintptr_t kCameraInLiquid = 0x00CD8794;
 constexpr uintptr_t kWorldFrame = 0x00B7436C;
 constexpr uintptr_t kWorldFrameFarClip = 0xB14;
 
+constexpr uintptr_t kFogGroupStart[2] = {0x00D38B90, 0x00D38BA4};
+constexpr uintptr_t kFogGroupEnd[2] = {0x00D38B94, 0x00D38BA8};
+
 constexpr uintptr_t kDayFraction = 0x00D38B04;
 constexpr uintptr_t kSkyCenter = 0x00D38B18;
 constexpr uintptr_t kFogColor = 0x00D38BA0;
@@ -143,7 +146,7 @@ bool BuildFrameInputsUnsafe(FrameInputs& out)
     out.sunColor = Read<uint32_t>(kSunColor);
     out.directColor = Read<uint32_t>(kDirectColor);
     out.ambientColor = Read<uint32_t>(kAmbientColor);
-    out.inLiquid = Read<uint32_t>(kCameraInLiquid) != 0;
+    out.inLiquid = CameraInLiquid();
 
     out.zoneFogDistance = Read<float>(kZoneFogDistance);
     out.farClip = out.proj[14] / (1.0f - out.proj[10]);
@@ -178,6 +181,31 @@ void* GameD3DDevice()
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         return nullptr;
+    }
+}
+
+bool CameraInLiquid()
+{
+    return Read<uint32_t>(kCameraInLiquid) != 0;
+}
+
+StockFog ReadStockFog()
+{
+    StockFog fog;
+    for (int i = 0; i < 2; ++i)
+    {
+        fog.start[i] = Read<float>(kFogGroupStart[i]);
+        fog.end[i] = Read<float>(kFogGroupEnd[i]);
+    }
+    return fog;
+}
+
+void WriteStockFog(const StockFog& fog)
+{
+    for (int i = 0; i < 2; ++i)
+    {
+        *reinterpret_cast<float*>(kFogGroupStart[i]) = fog.start[i];
+        *reinterpret_cast<float*>(kFogGroupEnd[i]) = fog.end[i];
     }
 }
 

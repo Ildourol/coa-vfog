@@ -23,6 +23,15 @@ constexpr float kGroundSun = 0.8f;
 constexpr float kGroundAmbient = 0.75f;
 constexpr float kGroundShadowDensity = 0.85f;
 
+constexpr float kFarOpticalDepth = 3.0f;
+constexpr float kFarRamp = 60.0f;
+constexpr float kFarStartFraction = 0.25f;
+constexpr float kFarG = 0.2f;
+constexpr float kFarIsotropic = 0.7f;
+constexpr float kFarSun = 0.45f;
+constexpr float kFarAmbient = 0.6f;
+constexpr float kFarSkyFalloff = 10.0f;
+
 constexpr float kMoonLight = 0.35f;
 constexpr float kReferenceFarTarget = 200.0f;
 
@@ -104,6 +113,29 @@ FogParams BuildFogParams(const FrameInputs& in, const Config& cfg)
     ground.heightFalloff = kGroundFalloff;
     ground.shadowed = shadowed;
     ground.shadowDensity = kGroundShadowDensity;
+
+    // Distance fog that replaces the stock fog: optical depth kFarOpticalDepth where the stock fog
+    // turns opaque, ramping as 1 + k (t / range)^2 from the stock fog's start, and nothing beyond.
+    FogLayer& distance = p.layers[2];
+    float range = p.maxDistance;
+    p.farLimit = std::clamp(in.fogEnd, 100.0f, in.farClip);
+    float farStart = std::min(std::max(in.fogStart, 0.0f), p.farLimit * kFarStartFraction);
+    float us = farStart / range;
+    float uf = p.farLimit / range;
+    float shape = range * ((uf - us) + kFarRamp * (uf * uf * uf - us * us * us) / 3.0f);
+    distance.start = farStart;
+    distance.density = cfg.stockFog == 1 && shape > 0.0f ? kFarOpticalDepth * cfg.farFog * cfg.density / shape : 0.0f;
+    distance.g = kFarG;
+    distance.isotropic = kFarIsotropic;
+    Scale(fogColor, kFarAmbient * cfg.ambient, distance.emissive);
+    distance.strength = kFarRamp;
+    Scale(p.lightColor, kFarSun * sun, distance.diffuse);
+    distance.exponent = 2.0f;
+    distance.heightBase = p.referenceZ;
+    distance.heightFalloff = 0.0f;
+    distance.shadowed = 0.0f;
+    distance.shadowDensity = 1.0f;
+    p.farSkyFalloff = kFarSkyFalloff;
     return p;
 }
 
