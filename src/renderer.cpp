@@ -1,0 +1,540 @@
+#include "renderer.h"
+
+#include "fog_model.h"
+#include "log.h"
+
+#include "ps_composite.h"
+#include "ps_march_high.h"
+#include "ps_march_low.h"
+#include "ps_march_mid.h"
+#include "ps_ray_blur.h"
+#include "ps_ray_mask.h"
+#include "ps_temporal.h"
+#include "vs_fullscreen.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+
+namespace
+{
+constexpr UINT kPixelConstants = 24;
+constexpr DWORD kStages = 3;
+constexpr UINT kRayScale = 4;
+constexpr float kSkyDepth = 0.9999995f;
+constexpr float kRayFalloff = 8.0f;
+constexpr float kRayThreshold = 0.12f;
+constexpr float kRayStep = 0.075f;
+constexpr float kRayDecay = 0.9f;
+constexpr int kRayTaps = 8;
+constexpr float kHistoryMaxSeconds = 0.25f;
+constexpr float kHistoryMaxMove = 30.0f;
+constexpr float kShadowMinStep = 1.5f;
+constexpr float kShadowStepPerYard = 0.035f;
+constexpr float kShadowThicknessSteps = 4.0f;
+
+const D3DRENDERSTATETYPE kRenderStates[] = {
+    D3DRS_ZENABLE,          D3DRS_ZWRITEENABLE,  D3DRS_ALPHATESTENABLE,   D3DRS_ALPHABLENDENABLE,
+    D3DRS_SRCBLEND,         D3DRS_DESTBLEND,     D3DRS_BLENDOP,           D3DRS_SEPARATEALPHABLENDENABLE,
+    D3DRS_CULLMODE,         D3DRS_STENCILENABLE, D3DRS_TWOSIDEDSTENCILMODE, D3DRS_SCISSORTESTENABLE,
+    D3DRS_COLORWRITEENABLE, D3DRS_SRGBWRITEENABLE, D3DRS_FOGENABLE,       D3DRS_CLIPPLANEENABLE,
+    D3DRS_FILLMODE,
+};
+
+const D3DSAMPLERSTATETYPE kSamplerStates[] = {
+    D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV,  D3DSAMP_ADDRESSW,    D3DSAMP_MAGFILTER,
+    D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER, D3DSAMP_SRGBTEXTURE, D3DSAMP_MAXMIPLEVEL,
+};
+
+struct Float4
+{
+    float x, y, z, w;
+};
+
+template <typename T>
+void SafeRelease(T*& p)
+{
+    if (p)
+    {
+        p->Release();
+        p = nullptr;
+    }
+}
+
+long long Ticks()
+{
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return t.QuadPart;
+}
+
+double TickSeconds(long long ticks)
+{
+    static LARGE_INTEGER freq = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return f;
+    }();
+    return static_cast<double>(ticks) / static_cast<double>(freq.QuadPart);
+}
+
+bool CreateTarget(IDirect3DDevice9* dev, UINT w, UINT h, D3DFORMAT fmt, IDirect3DTexture9** out)
+{
+    return SUCCEEDED(dev->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, fmt, D3DPOOL_DEFAULT, out, nullptr));
+}
+
+void SetTarget(IDirect3DDevice9* dev, IDirect3DTexture9* tex)
+{
+    IDirect3DSurface9* surface = nullptr;
+    if (SUCCEEDED(tex->GetSurfaceLevel(0, &surface)))
+    {
+        dev->SetRenderTarget(0, surface);
+        surface->Release();
+    }
+}
+
+void Normalize3(float* v)
+{
+    float len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (len > 1e-6f)
+    {
+        v[0] /= len;
+        v[1] /= len;
+        v[2] /= len;
+    }
+}
+}
+
+Renderer::~Renderer()
+{
+    ReleaseAll();
+}
+
+void Renderer::ReleaseDefaultPool()
+{
+    SafeRelease(m_marchTarget);
+    SafeRelease(m_history[0]);
+    SafeRelease(m_history[1]);
+    SafeRelease(m_rays[0]);
+    SafeRelease(m_rays[1]);
+    SafeRelease(m_state);
+    m_lowW = m_lowH = m_rayW = m_rayH = 0;
+    m_historyValid = false;
+}
+
+void Renderer::ReleaseAll()
+{
+    ReleaseDefaultPool();
+    SafeRelease(m_vs);
+    for (auto*& ps : m_march)
+        SafeRelease(ps);
+    SafeRelease(m_temporal);
+    SafeRelease(m_composite);
+    SafeRelease(m_rayMask);
+    SafeRelease(m_rayBlur);
+    SafeRelease(m_decl);
+}
+
+bool Renderer::Skip(const char* reason)
+{
+    m_skip = reason;
+    return false;
+}
+
+bool Renderer::EnsureShaders(IDirect3DDevice9* dev)
+{
+    if (m_vs)
+        return true;
+    auto ps = [dev](const BYTE* code, IDirect3DPixelShader9** out) {
+        return SUCCEEDED(dev->CreatePixelShader(reinterpret_cast<const DWORD*>(code), out));
+    };
+    static const D3DVERTEXELEMENT9 kElements[] = {
+        {0, 0, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0},
+        D3DDECL_END(),
+    };
+    bool ok = SUCCEEDED(dev->CreateVertexShader(reinterpret_cast<const DWORD*>(g_vs_fullscreen), &m_vs)) &&
+              ps(g_ps_march_low, &m_march[0]) && ps(g_ps_march_mid, &m_march[1]) &&
+              ps(g_ps_march_high, &m_march[2]) && ps(g_ps_temporal, &m_temporal) &&
+              ps(g_ps_composite, &m_composite) && ps(g_ps_ray_mask, &m_rayMask) && ps(g_ps_ray_blur, &m_rayBlur) &&
+              SUCCEEDED(dev->CreateVertexDeclaration(kElements, &m_decl));
+    if (!ok)
+    {
+        VF_LOG_ERROR("shader creation failed; fog disabled for this device");
+        ReleaseAll();
+        return Skip("shader creation failed");
+    }
+    return true;
+}
+
+bool Renderer::EnsureStateBlock(IDirect3DDevice9* dev)
+{
+    if (m_state)
+        return true;
+    if (FAILED(dev->BeginStateBlock()))
+        return Skip("state block recording failed");
+    for (D3DRENDERSTATETYPE rs : kRenderStates)
+        dev->SetRenderState(rs, 0);
+    for (DWORD stage = 0; stage < kStages; ++stage)
+    {
+        dev->SetTexture(stage, nullptr);
+        for (D3DSAMPLERSTATETYPE ss : kSamplerStates)
+            dev->SetSamplerState(stage, ss, 0);
+    }
+    float zeros[kPixelConstants * 4] = {};
+    dev->SetVertexShader(nullptr);
+    dev->SetPixelShader(nullptr);
+    dev->SetPixelShaderConstantF(0, zeros, kPixelConstants);
+    dev->SetVertexDeclaration(m_decl);
+    dev->SetStreamSource(0, nullptr, 0, 0);
+    dev->SetStreamSourceFreq(0, 1);
+    D3DVIEWPORT9 vp = {0, 0, 1, 1, 0.0f, 1.0f};
+    dev->SetViewport(&vp);
+    RECT scissor = {0, 0, 1, 1};
+    dev->SetScissorRect(&scissor);
+    if (FAILED(dev->EndStateBlock(&m_state)) || !m_state)
+    {
+        m_state = nullptr;
+        return Skip("state block recording failed");
+    }
+    return true;
+}
+
+bool Renderer::EnsureTargets(IDirect3DDevice9* dev, UINT lowW, UINT lowH, UINT rayW, UINT rayH)
+{
+    if (m_marchTarget && m_lowW == lowW && m_lowH == lowH && m_rayW == rayW && m_rayH == rayH)
+        return true;
+    SafeRelease(m_marchTarget);
+    SafeRelease(m_history[0]);
+    SafeRelease(m_history[1]);
+    SafeRelease(m_rays[0]);
+    SafeRelease(m_rays[1]);
+    m_historyValid = false;
+
+    D3DFORMAT fogFormat = D3DFMT_A16B16G16R16F;
+    bool ok = CreateTarget(dev, lowW, lowH, fogFormat, &m_marchTarget);
+    if (!ok)
+    {
+        fogFormat = D3DFMT_A8R8G8B8;
+        ok = CreateTarget(dev, lowW, lowH, fogFormat, &m_marchTarget);
+    }
+    ok = ok && CreateTarget(dev, lowW, lowH, fogFormat, &m_history[0]) &&
+         CreateTarget(dev, lowW, lowH, fogFormat, &m_history[1]) &&
+         CreateTarget(dev, rayW, rayH, D3DFMT_A8R8G8B8, &m_rays[0]) &&
+         CreateTarget(dev, rayW, rayH, D3DFMT_A8R8G8B8, &m_rays[1]);
+    if (!ok)
+    {
+        VF_LOG_ERROR("render target creation failed (%ux%u)", lowW, lowH);
+        SafeRelease(m_marchTarget);
+        SafeRelease(m_history[0]);
+        SafeRelease(m_history[1]);
+        SafeRelease(m_rays[0]);
+        SafeRelease(m_rays[1]);
+        return Skip("render target creation failed");
+    }
+
+    m_fogFilterable = fogFormat == D3DFMT_A8R8G8B8;
+    IDirect3D9* d3d = nullptr;
+    D3DDEVICE_CREATION_PARAMETERS cp;
+    D3DDISPLAYMODE mode;
+    if (!m_fogFilterable && SUCCEEDED(dev->GetDirect3D(&d3d)) && SUCCEEDED(dev->GetCreationParameters(&cp)) &&
+        SUCCEEDED(d3d->GetAdapterDisplayMode(cp.AdapterOrdinal, &mode)))
+    {
+        m_fogFilterable = SUCCEEDED(d3d->CheckDeviceFormat(cp.AdapterOrdinal, cp.DeviceType, mode.Format,
+                                                           D3DUSAGE_RENDERTARGET | D3DUSAGE_QUERY_FILTER,
+                                                           D3DRTYPE_TEXTURE, fogFormat));
+    }
+    SafeRelease(d3d);
+
+    m_lowW = lowW;
+    m_lowH = lowH;
+    m_rayW = rayW;
+    m_rayH = rayH;
+    VF_LOG_INFO("targets: fog %ux%u (%s, filter %d), rays %ux%u", lowW, lowH,
+                fogFormat == D3DFMT_A16B16G16R16F ? "fp16" : "rgba8", m_fogFilterable ? 1 : 0, rayW, rayH);
+    return true;
+}
+
+void Renderer::DrawFullscreen(IDirect3DDevice9* dev)
+{
+    static const float kTriangle[3][4] = {{-1.0f, -1.0f, 0.0f, 1.0f}, {-1.0f, 3.0f, 0.0f, 1.0f}, {3.0f, -1.0f, 0.0f, 1.0f}};
+    dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, kTriangle, sizeof(kTriangle[0]));
+}
+
+void Renderer::BindTexture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseTexture9* tex, bool linear)
+{
+    DWORD filter = linear ? D3DTEXF_LINEAR : D3DTEXF_POINT;
+    dev->SetTexture(stage, tex);
+    dev->SetSamplerState(stage, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+    dev->SetSamplerState(stage, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    dev->SetSamplerState(stage, D3DSAMP_ADDRESSW, D3DTADDRESS_CLAMP);
+    dev->SetSamplerState(stage, D3DSAMP_MAGFILTER, filter);
+    dev->SetSamplerState(stage, D3DSAMP_MINFILTER, filter);
+    dev->SetSamplerState(stage, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+    dev->SetSamplerState(stage, D3DSAMP_SRGBTEXTURE, FALSE);
+    dev->SetSamplerState(stage, D3DSAMP_MAXMIPLEVEL, 0);
+}
+
+bool Renderer::Render(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DSurface9* depthSurface,
+                      const FrameInputs& in, const Config& cfg)
+{
+    m_skip = "";
+    if (dev->TestCooperativeLevel() != D3D_OK)
+        return Skip("device not ready");
+    if (!EnsureShaders(dev) || !EnsureStateBlock(dev))
+        return false;
+
+    IDirect3DSurface9* saved[4] = {};
+    for (DWORD i = 0; i < 4; ++i)
+        dev->GetRenderTarget(i, &saved[i]);
+    IDirect3DSurface9* savedDepth = nullptr;
+    dev->GetDepthStencilSurface(&savedDepth);
+
+    bool ok = false;
+    D3DSURFACE_DESC rtDesc = {};
+    D3DSURFACE_DESC depthDesc = {};
+    if (!saved[0])
+        Skip("no render target");
+    else if (savedDepth != depthSurface)
+        Skip("fog depth surface not bound");
+    else if (FAILED(saved[0]->GetDesc(&rtDesc)) || FAILED(depthSurface->GetDesc(&depthDesc)))
+        Skip("surface description failed");
+    else if (rtDesc.Width != depthDesc.Width || rtDesc.Height != depthDesc.Height)
+        Skip("render target and depth sizes differ");
+    else if (rtDesc.MultiSampleType != D3DMULTISAMPLE_NONE)
+        Skip("multisampled render target");
+    else
+    {
+        IDirect3DVertexBuffer9* stream = nullptr;
+        UINT streamOffset = 0;
+        UINT streamStride = 0;
+        dev->GetStreamSource(0, &stream, &streamOffset, &streamStride);
+        m_state->Capture();
+        for (DWORD i = 1; i < 4; ++i)
+            if (saved[i])
+                dev->SetRenderTarget(i, nullptr);
+        ok = RenderPasses(dev, depthTexture, saved[0], depthDesc, in, cfg);
+        dev->SetRenderTarget(0, saved[0]);
+        for (DWORD i = 1; i < 4; ++i)
+            if (saved[i])
+                dev->SetRenderTarget(i, saved[i]);
+        dev->SetDepthStencilSurface(savedDepth);
+        m_state->Apply();
+        dev->SetStreamSource(0, stream, streamOffset, streamStride);
+        SafeRelease(stream);
+    }
+
+    for (auto*& s : saved)
+        SafeRelease(s);
+    SafeRelease(savedDepth);
+    return ok;
+}
+
+bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DSurface9* target,
+                            const D3DSURFACE_DESC& depthDesc, const FrameInputs& in, const Config& cfg)
+{
+    const D3DVIEWPORT9 vp = in.viewport;
+    if (vp.Width < 16 || vp.Height < 16 || vp.X + vp.Width > depthDesc.Width || vp.Y + vp.Height > depthDesc.Height)
+        return Skip("world viewport outside the render target");
+
+    const UINT scale = cfg.quality == 1 ? 4u : 2u;
+    const UINT lowW = (vp.Width + scale - 1) / scale;
+    const UINT lowH = (vp.Height + scale - 1) / scale;
+    const UINT rayW = std::max(1u, static_cast<UINT>(vp.Width) / kRayScale);
+    const UINT rayH = std::max(1u, static_cast<UINT>(vp.Height) / kRayScale);
+    if (!EnsureTargets(dev, lowW, lowH, rayW, rayH))
+        return false;
+
+    float invView[16];
+    if (!Invert4x4(in.view, invView))
+        return Skip("view matrix not invertible");
+
+    const FogParams fog = BuildFogParams(in, cfg);
+    const float* P = in.proj;
+    const float depthA = (1.0f + P[10]) * 0.5f;
+    const float depthB = P[14] * 0.5f;
+
+    float toLightV[3];
+    TransformDirection(in.toLight, in.view, toLightV);
+    Normalize3(toLightV);
+
+    float common[9][4] = {
+        {static_cast<float>(vp.X), static_cast<float>(vp.Y), static_cast<float>(vp.Width),
+         static_cast<float>(vp.Height)},
+        {static_cast<float>(scale), static_cast<float>(m_frame % 1024u), 1.0f / depthDesc.Width,
+         1.0f / depthDesc.Height},
+        {P[0], P[5], P[8], P[9]},
+        {depthA, depthB, fog.maxDistance, kSkyDepth},
+        {},
+        {},
+        {},
+        {},
+        {static_cast<float>(lowW), static_cast<float>(lowH), 1.0f / lowW, 1.0f / lowH},
+    };
+    std::memcpy(common[4], invView, sizeof(invView));
+
+    const long long now = Ticks();
+    const float dx = in.camPos[0] - m_prevCam[0];
+    const float dy = in.camPos[1] - m_prevCam[1];
+    const float dz = in.camPos[2] - m_prevCam[2];
+    const bool historyValid = m_historyValid && cfg.temporal > 0.0f && m_prevScale == scale &&
+                              std::memcmp(&m_prevViewport, &vp, sizeof(vp)) == 0 &&
+                              TickSeconds(now - m_prevTicks) < kHistoryMaxSeconds &&
+                              dx * dx + dy * dy + dz * dz < kHistoryMaxMove * kHistoryMaxMove;
+    float reproj[16];
+    float prevViewProj[16];
+    Mul4x4(m_prevView, m_prevProj, prevViewProj);
+    Mul4x4(invView, prevViewProj, reproj);
+
+    float sunPx[2] = {};
+    bool sunInFront = toLightV[2] > 0.05f;
+    float sunScreenFade = 0.0f;
+    if (sunInFront)
+    {
+        float ndcX = toLightV[0] / toLightV[2] * P[0] + P[8];
+        float ndcY = toLightV[1] / toLightV[2] * P[5] + P[9];
+        sunPx[0] = vp.X + (ndcX * 0.5f + 0.5f) * vp.Width;
+        sunPx[1] = vp.Y + (0.5f - ndcY * 0.5f) * vp.Height;
+        sunScreenFade = std::clamp(1.6f - std::max(std::fabs(ndcX), std::fabs(ndcY)), 0.0f, 1.0f);
+    }
+    const float rayStrength = cfg.godRays * fog.lightVisibility * sunScreenFade;
+    const bool rays = rayStrength > 0.005f;
+
+    if (m_logged < 1 || (LogEnabled(LogLevel::Debug) && m_frame % 600u == 0))
+    {
+        ++m_logged;
+        float n = -P[14] / (1.0f + P[10]);
+        float f = P[14] / (1.0f - P[10]);
+        VF_LOG_INFO("frame %u: viewport %lu,%lu %lux%lu of %ux%u; near %.3f far %.1f (farclip %.1f) maxdist %.0f",
+                    m_frame, vp.X, vp.Y, vp.Width, vp.Height, depthDesc.Width, depthDesc.Height, n, f, in.farClip,
+                    fog.maxDistance);
+        VF_LOG_INFO("  camera (%.2f %.2f %.2f) inverse-view origin (%.2f %.2f %.2f) target (%.2f %.2f %.2f)",
+                    in.camPos[0], in.camPos[1], in.camPos[2], invView[12], invView[13], invView[14],
+                    in.camTarget[0], in.camTarget[1], in.camTarget[2]);
+        VF_LOG_INFO("  day %.4f %s toLight (%.3f %.3f %.3f) view (%.3f %.3f %.3f) vis %.2f sunPx (%.0f %.0f) rays %.2f",
+                    in.dayFraction, in.lightIsMoon ? "moon" : "sun", in.toLight[0], in.toLight[1], in.toLight[2],
+                    toLightV[0], toLightV[1], toLightV[2], fog.lightVisibility, sunPx[0], sunPx[1], rayStrength);
+        VF_LOG_INFO("  fog %08X start %.1f end %.1f sun %08X direct %08X ambient %08X refZ %.1f haze %.6f ground %.6f",
+                    in.fogColor, in.fogStart, in.fogEnd, in.sunColor, in.directColor, in.ambientColor, fog.referenceZ,
+                    fog.layers[0].density, fog.layers[1].density);
+    }
+
+    dev->SetDepthStencilSurface(nullptr);
+    dev->SetVertexShader(m_vs);
+    dev->SetVertexDeclaration(m_decl);
+    dev->SetStreamSourceFreq(0, 1);
+    dev->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
+    dev->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+    dev->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+    dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+    dev->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, FALSE);
+    dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    dev->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+    dev->SetRenderState(D3DRS_TWOSIDEDSTENCILMODE, FALSE);
+    dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+    dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF);
+    dev->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+    dev->SetRenderState(D3DRS_FOGENABLE, FALSE);
+    dev->SetRenderState(D3DRS_CLIPPLANEENABLE, 0);
+    dev->SetRenderState(D3DRS_FILLMODE, D3DFILL_SOLID);
+    dev->SetPixelShaderConstantF(0, &common[0][0], 9);
+
+    SetTarget(dev, m_marchTarget);
+    dev->SetPixelShader(m_march[std::clamp(cfg.quality, 1, 3) - 1]);
+    const Float4 march[3] = {
+        {toLightV[0], toLightV[1], toLightV[2], fog.lightVisibility},
+        {kShadowMinStep, kShadowStepPerYard, cfg.lightShafts && fog.lightVisibility > 0.001f ? 1.0f : 0.0f,
+         kShadowThicknessSteps},
+        {1.0f, fog.maxDistance, fog.horizonStart, fog.farClip},
+    };
+    dev->SetPixelShaderConstantF(9, &march[0].x, 3);
+    dev->SetPixelShaderConstantF(12, &fog.layers[0].start, 8);
+    BindTexture(dev, 0, depthTexture, false);
+    DrawFullscreen(dev);
+
+    const int write = m_historyIndex ^ 1;
+    SetTarget(dev, m_history[write]);
+    dev->SetPixelShader(m_temporal);
+    const Float4 temporal = {cfg.temporal, historyValid ? 1.0f : 0.0f, 0.0f, 0.0f};
+    dev->SetPixelShaderConstantF(9, reproj, 4);
+    dev->SetPixelShaderConstantF(13, &temporal.x, 1);
+    BindTexture(dev, 0, m_marchTarget, false);
+    BindTexture(dev, 1, m_history[m_historyIndex], m_fogFilterable);
+    BindTexture(dev, 2, depthTexture, false);
+    DrawFullscreen(dev);
+
+    if (rays)
+    {
+        IDirect3DSurface9* raySurface = nullptr;
+        RECT world = {static_cast<LONG>(vp.X), static_cast<LONG>(vp.Y), static_cast<LONG>(vp.X + vp.Width),
+                      static_cast<LONG>(vp.Y + vp.Height)};
+        if (SUCCEEDED(m_rays[0]->GetSurfaceLevel(0, &raySurface)))
+        {
+            dev->StretchRect(target, &world, raySurface, nullptr, D3DTEXF_LINEAR);
+            raySurface->Release();
+        }
+        SetTarget(dev, m_rays[1]);
+        dev->SetPixelShader(m_rayMask);
+        const Float4 mask[2] = {
+            {toLightV[0], toLightV[1], toLightV[2], kRayFalloff},
+            {static_cast<float>(vp.Width) / rayW, kRayThreshold, 1.0f / rayW, 1.0f / rayH},
+        };
+        dev->SetPixelShaderConstantF(9, &mask[0].x, 2);
+        BindTexture(dev, 0, depthTexture, false);
+        BindTexture(dev, 1, m_rays[0], true);
+        DrawFullscreen(dev);
+
+        float norm = 0.0f;
+        for (int k = 0; k < kRayTaps; ++k)
+            norm += std::pow(kRayDecay, static_cast<float>(k));
+        const float sunUv[2] = {(sunPx[0] - vp.X) / vp.Width, (sunPx[1] - vp.Y) / vp.Height};
+        dev->SetPixelShader(m_rayBlur);
+        float step = kRayStep;
+        for (int pass = 0; pass < 2; ++pass)
+        {
+            SetTarget(dev, m_rays[pass == 0 ? 0 : 1]);
+            const Float4 blur[2] = {
+                {sunUv[0], sunUv[1], step, 1.0f / norm},
+                {static_cast<float>(rayW), static_cast<float>(rayH), 1.0f / rayW, 1.0f / rayH},
+            };
+            dev->SetPixelShaderConstantF(9, &blur[0].x, 2);
+            BindTexture(dev, 0, m_rays[pass == 0 ? 1 : 0], true);
+            DrawFullscreen(dev);
+            step /= kRayTaps;
+        }
+    }
+
+    dev->SetRenderTarget(0, target);
+    dev->SetViewport(&vp);
+    RECT scissor = {static_cast<LONG>(vp.X), static_cast<LONG>(vp.Y), static_cast<LONG>(vp.X + vp.Width),
+                    static_cast<LONG>(vp.Y + vp.Height)};
+    dev->SetScissorRect(&scissor);
+    dev->SetRenderState(D3DRS_SCISSORTESTENABLE, TRUE);
+    dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+    dev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_ONE);
+    dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+    dev->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
+    dev->SetRenderState(D3DRS_COLORWRITEENABLE,
+                        D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE);
+    dev->SetPixelShader(m_composite);
+    const Float4 composite[3] = {
+        {cfg.exposure, rays ? rayStrength : 0.0f, static_cast<float>(cfg.debugView), 0.0f},
+        {fog.lightColor[0], fog.lightColor[1], fog.lightColor[2], 0.0f},
+        {sunPx[0], sunPx[1], cfg.sunMarker && sunInFront ? 1.0f : 0.0f, 0.0f},
+    };
+    dev->SetPixelShaderConstantF(9, &composite[0].x, 3);
+    BindTexture(dev, 0, depthTexture, false);
+    BindTexture(dev, 1, m_history[write], false);
+    BindTexture(dev, 2, m_rays[1], true);
+    DrawFullscreen(dev);
+
+    std::memcpy(m_prevView, in.view, sizeof(m_prevView));
+    std::memcpy(m_prevProj, in.proj, sizeof(m_prevProj));
+    std::memcpy(m_prevCam, in.camPos, sizeof(m_prevCam));
+    m_prevViewport = vp;
+    m_prevScale = scale;
+    m_prevTicks = now;
+    m_historyIndex = write;
+    m_historyValid = true;
+    ++m_frame;
+    return true;
+}

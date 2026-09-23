@@ -1,0 +1,79 @@
+#include "config.h"
+#include "d3d9_wrap.h"
+#include "engine.h"
+#include "hooks.h"
+#include "log.h"
+
+#include <windows.h>
+
+#include <string>
+
+namespace
+{
+std::string ModuleDirectory(HMODULE module)
+{
+    char path[MAX_PATH] = {};
+    DWORD n = GetModuleFileNameA(module, path, MAX_PATH);
+    std::string dir(path, n);
+    size_t slash = dir.find_last_of("\\/");
+    return slash == std::string::npos ? std::string() : dir.substr(0, slash + 1);
+}
+
+void Attach(HMODULE module)
+{
+    std::string dir = ModuleDirectory(module);
+    GlobalConfig().Load(dir + "CoAVolFog.ini");
+    LogOpen((dir + "CoAVolFog.log").c_str());
+    const Config& cfg = GlobalConfig().Get();
+    VF_LOG_INFO("CoAVolFog loaded from %s", dir.c_str());
+
+    if (!engine::IsSupportedClient())
+    {
+        VF_LOG_INFO("host is not the 3.3.5a (12340) client; engine hooks skipped");
+        return;
+    }
+    if (!cfg.enable)
+    {
+        VF_LOG_INFO("Enable=0; the client runs unmodified");
+        return;
+    }
+    if (!cfg.hooks)
+    {
+        VF_LOG_INFO("EngineHooks=0; the client runs unmodified");
+        return;
+    }
+    AllowFog(InstallEngineHooks());
+}
+}
+
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
+{
+    if (reason == DLL_PROCESS_ATTACH)
+    {
+        DisableThreadLibraryCalls(instance);
+        Attach(instance);
+    }
+    return TRUE;
+}
+
+extern "C" int __cdecl vf_loader_anchor()
+{
+    return 1;
+}
+
+extern "C" IDirect3D9* __cdecl vf_test_wrap_direct3d9(Direct3DCreate9Fn realCreate, UINT sdkVersion)
+{
+    SetRealDirect3DCreate9(realCreate);
+    AllowFog(true);
+    return WrappedDirect3DCreate9(sdkVersion);
+}
+
+extern "C" void __cdecl vf_test_set_config(const Config* cfg)
+{
+    GlobalConfig().Override(*cfg);
+}
+
+extern "C" int __cdecl vf_test_render(const FrameInputs* in, const char** skipReason)
+{
+    return RenderFog(ActiveFogDevice(), *in, GlobalConfig().Get(), skipReason) ? 1 : 0;
+}
