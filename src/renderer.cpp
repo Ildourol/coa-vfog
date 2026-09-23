@@ -323,7 +323,7 @@ bool Renderer::EnsureSceneCopy(IDirect3DDevice9* dev, IDirect3DSurface9* target,
 
 // Logs raw depth, linear depth and fog opacity at a 5x5 grid, so a log shows what the fog sees in the client.
 void Renderer::LogProbe(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DTexture9* fog,
-                        const D3DVIEWPORT9& vp, float worldDepthLimit)
+                        const D3DVIEWPORT9& vp, float worldDepthLimit, float dayFraction)
 {
     if (m_probeFailed)
         return;
@@ -362,9 +362,9 @@ void Renderer::LogProbe(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, 
         return;
     }
     const float* p = static_cast<const float*>(locked.pBits);
-    VF_LOG_INFO("depth probe %u: viewport depth %.4f..%.4f, world depth up to %.7f; per point raw depth / yd / fog "
-                "opacity (w world, f beyond the far clip, s sky)",
-                m_probeAttempts, vp.MinZ, vp.MaxZ, worldDepthLimit);
+    VF_LOG_INFO("depth probe %u: day %.4f, viewport depth %.4f..%.4f, world depth up to %.7f; per point raw depth / yd "
+                "/ fog opacity (w world, f beyond the far clip, s sky)",
+                m_probeAttempts, dayFraction, vp.MinZ, vp.MaxZ, worldDepthLimit);
     for (int row = 0; row < 5; ++row)
     {
         char line[256] = {};
@@ -567,9 +567,10 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
                     in.dayFraction, in.lightIsMoon ? "moon" : "sun", in.toLight[0], in.toLight[1], in.toLight[2],
                     toLightV[0], toLightV[1], toLightV[2], fog.lightVisibility, fog.lightAboveHorizon, sunPx[0],
                     sunPx[1], rayStrength);
-        VF_LOG_INFO("  map %d fog %08X start %.1f end %.1f zone %.1f sun %08X direct %08X ambient %08X refZ %.1f",
+        VF_LOG_INFO("  map %d fog %08X start %.1f end %.1f zone %.1f sun %08X direct %08X ambient %08X refZ %.1f "
+                    "glow %.2f",
                     in.mapId, in.fogColor, in.fogStart, in.fogEnd, in.zoneFogDistance, in.sunColor, in.directColor,
-                    in.ambientColor, fog.referenceZ);
+                    in.ambientColor, fog.referenceZ, in.glow);
         for (int i = 0; i < kFogLayers; ++i)
         {
             const FogLayer& l = fog.layers[i];
@@ -705,7 +706,8 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
         {fog.authored ? cfg.classicExposure : cfg.exposure, rays ? rayStrength : 0.0f, static_cast<float>(cfg.debugView),
          blendMode},
         {fog.rayColor[0], fog.rayColor[1], fog.rayColor[2], 0.0f},
-        {sunPx[0], sunPx[1], cfg.sunMarker && sunInFront ? 1.0f : 0.0f, 0.0f},
+        {sunPx[0], sunPx[1], cfg.sunMarker && sunInFront ? 1.0f : 0.0f,
+         cfg.glowCompensation && sceneBlend ? in.glow : 0.0f},
     };
     dev->SetPixelShaderConstantF(9, &composite[0].x, 3);
     BindTexture(dev, 0, depthTexture, false);
@@ -722,7 +724,7 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
     {
         m_probeTicks = now;
         ++m_probeAttempts;
-        LogProbe(dev, depthTexture, m_history[write], vp, worldDepthLimit);
+        LogProbe(dev, depthTexture, m_history[write], vp, worldDepthLimit, in.dayFraction);
     }
 
     std::memcpy(m_prevView, viewAbs, sizeof(m_prevView));

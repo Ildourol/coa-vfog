@@ -7,6 +7,8 @@
 
 #include <windows.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace
@@ -191,6 +193,44 @@ bool SiteMatches(uintptr_t site, uintptr_t expectedTarget)
     std::memcpy(&rel, bytes + 1, sizeof(rel));
     return bytes[0] == 0xE8 && site + 5 + rel == expectedTarget;
 }
+
+using FarClipClampFn = float(__cdecl*)(float value, int map);
+float g_loggedFarClip = -1.0f;
+int g_loggedFarClipMap = -1;
+
+// The maps whose far clip Extensions.dll's detour of the clamp caps at 791.66; the engine allows 1583.33.
+bool CappedContinent(int map)
+{
+    return map == 0 || map == 1 || map == 530 || map == 571;
+}
+
+float FarClipClamp(float value, int map)
+{
+    float result = reinterpret_cast<FarClipClampFn>(engine::kFarClipClamp)(value, map);
+    const float lift = GlobalConfig().Get().farClipMax;
+    if (lift > 0.0f && CappedContinent(map) && std::isfinite(value))
+        result = std::max(result, std::clamp(value, kEngineFarClipMin, std::min(lift, kEngineFarClipMax)));
+    if (result != g_loggedFarClip || map != g_loggedFarClipMap)
+    {
+        g_loggedFarClip = result;
+        g_loggedFarClipMap = map;
+        VF_LOG_INFO("far clip: map %d, farclip setting %.1f -> %.2f", map, value, result);
+    }
+    return result;
+}
+}
+
+// 0x780810 / 0x781444: cdecl (farclip value, map id), result in ST0, the caller pops the arguments.
+extern "C" float __cdecl vf_far_clip_clamp(float value, int map)
+{
+    __try
+    {
+        return FarClipClamp(value, map);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return reinterpret_cast<FarClipClampFn>(engine::kFarClipClamp)(value, map);
+    }
 }
 
 extern "C" void __cdecl vf_on_frame_begin()
@@ -370,4 +410,32 @@ bool InstallEngineHooks()
                 static_cast<unsigned>(engine::kWorldRenderSite), static_cast<unsigned>(engine::kOpaqueDoneSite),
                 static_cast<unsigned>(engine::kLiquidSurfaceSite), static_cast<unsigned>(engine::kWorldDoneSite));
     return true;
+}
+
+// Installed only when FarClipMax is set at start-up; a mismatch here only leaves the client's far clip as it is.
+void InstallFarClipHooks()
+{
+    if (GlobalConfig().Get().farClipMax <= 0.0f)
+    {
+        VF_LOG_INFO("far clip hooks not installed (FarClipMax=0)");
+        return;
+    }
+    const uintptr_t sites[] = {engine::kFarClipSetSite, engine::kFarClipMapLoadSite};
+    for (uintptr_t site : sites)
+        if (!SiteMatches(site, engine::kFarClipClamp))
+        {
+            VF_LOG_ERROR("far clip call site 0x%08X differs from the 12340 client; far clip left alone",
+                         static_cast<unsigned>(site));
+            return;
+        }
+    if (!PatchCallSite(sites[0], engine::kFarClipClamp, reinterpret_cast<const void*>(&vf_far_clip_clamp)))
+        return;
+    if (!PatchCallSite(sites[1], engine::kFarClipClamp, reinterpret_cast<const void*>(&vf_far_clip_clamp)))
+    {
+        PatchCallSite(sites[0], reinterpret_cast<uintptr_t>(&vf_far_clip_clamp),
+                      reinterpret_cast<const void*>(engine::kFarClipClamp));
+        return;
+    }
+    VF_LOG_INFO("far clip hooks installed at 0x%08X and 0x%08X (FarClipMax %.0f)", static_cast<unsigned>(sites[0]),
+                static_cast<unsigned>(sites[1]), GlobalConfig().Get().farClipMax);
 }

@@ -732,7 +732,7 @@ int Run(const std::wstring& outDir, const std::string& dataPath)
         // encode(RollOff(scene * T + L)) rebuilt from the radiance and transmittance debug views. The temporal
         // filter converges each run so the march jitter averages out.
         LookAt(eye, at, view);
-        auto converge = [&](const Config& c) {
+        auto convergeGlow = [&](const Config& c, float glow) {
             vf_test_set_config(&c);
             Image img;
             for (int frame = 0; frame < 16; ++frame)
@@ -740,6 +740,7 @@ int Run(const std::wstring& outDir, const std::string& dataPath)
                 h.BeginFrame();
                 h.DrawScene(eye, view, proj, world);
                 FrameInputs in = MakeInputs(view, proj, eye, at, world);
+                in.glow = glow;
                 vf_test_render(&in, &skip);
                 if (frame == 15)
                     img = Capture(h.dev);
@@ -747,6 +748,7 @@ int Run(const std::wstring& outDir, const std::string& dataPath)
             }
             return img;
         };
+        auto converge = [&](const Config& c) { return convergeGlow(c, 0.0f); };
         h.BeginFrame();
         h.DrawScene(eye, view, proj, world);
         Image scene = Capture(h.dev);
@@ -797,6 +799,33 @@ int Run(const std::wstring& outDir, const std::string& dataPath)
             }
         std::printf("     linear composite vs scene * T + L: largest difference %.1f/255\n", worst * 255.0f);
         Check(worst < 4.0f / 255.0f, "fog blends over the scene in linear light");
+
+        // With the client's glow (screen + g * blur^2) running afterwards, fogged pixels are pre-inverted so that
+        // c' + g c'^2 lands on the composited colour c; the glow amount comes from the frame inputs.
+        const float glow = 0.65f;
+        Image compensated = convergeGlow(c, glow);
+        float glowWorst = 0.0f;
+        for (const auto& p : points)
+            for (int ch = 0; ch < 3; ++ch)
+            {
+                float cc = boxMean(composited, p[0], p[1], ch);
+                float a = 1.0f - boxMean(transmittance, p[0], p[1], 2);
+                float solved = (std::sqrt(1.0f + 4.0f * glow * cc) - 1.0f) / (2.0f * glow);
+                float expected = cc + (solved - cc) * a;
+                glowWorst = std::fmax(glowWorst, std::fabs(boxMean(compensated, p[0], p[1], ch) - expected));
+            }
+        Config noGlow = c;
+        noGlow.glowCompensation = false;
+        Image uncompensated = convergeGlow(noGlow, glow);
+        float offDiff = 0.0f;
+        for (const auto& p : points)
+            for (int ch = 0; ch < 3; ++ch)
+                offDiff = std::fmax(offDiff, std::fabs(boxMean(uncompensated, p[0], p[1], ch) -
+                                                       boxMean(composited, p[0], p[1], ch)));
+        std::printf("     glow compensation: largest difference %.1f/255; switched off %.1f/255\n", glowWorst * 255.0f,
+                    offDiff * 255.0f);
+        Check(glowWorst < 4.0f / 255.0f && offDiff < 1.0f / 255.0f,
+              "fog is pre-compensated for the client's glow, and GlowCompensation 0 turns it off");
 
         Config gamma = c;
         gamma.colorSpace = 0;

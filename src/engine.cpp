@@ -2,6 +2,7 @@
 
 #include "log.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -14,6 +15,15 @@ constexpr uintptr_t kGxD3DDevice = 0x397C;
 constexpr uintptr_t kGxProjection = 0xF88;
 // The Gx viewport's minZ/maxZ (stored by 0x681890, uploaded lazily by 0x6A99E0 on the next draw or clear).
 constexpr uintptr_t kGxViewportMinZ = 0xF80;
+
+// Screen effects (FFX end 0x8C1010): the effect runs when the ffx CVar is on and the current effect is enabled.
+// The glow effect keeps its ffxGlow CVar at +4 (0x8BFEDB); 0x4F8770 feeds it the DayNight glow at +0x12C.
+constexpr uintptr_t kFfxCVar = 0x00D45774;
+constexpr uintptr_t kCurrentScreenEffect = 0x00D45780;
+constexpr uintptr_t kGlowEffect = 0x00B74364;
+constexpr uintptr_t kGlowEffectCVar = 0x4;
+constexpr uintptr_t kCVarInt = 0x30;
+constexpr uintptr_t kDayNightGlow = 0x00D38C2C;
 constexpr uintptr_t kGxViewIndex = 0x1AF8;
 constexpr uintptr_t kGxViewBase = 0x1B00;
 constexpr uint32_t kGxViewStackDepth = 64;
@@ -165,6 +175,16 @@ bool BuildFrameInputsUnsafe(FrameInputs& out)
     out.mapId = Read<int32_t>(kCurrentMap);
 
     out.zoneFogDistance = Read<float>(kZoneFogDistance);
+    out.glow = 0.0f;
+    uintptr_t ffx = Read<uintptr_t>(kFfxCVar);
+    uintptr_t effect = Read<uintptr_t>(kCurrentScreenEffect);
+    if (ffx && Read<int32_t>(ffx + kCVarInt) != 0 && effect && effect == Read<uintptr_t>(kGlowEffect))
+    {
+        uintptr_t glowCVar = Read<uintptr_t>(effect + kGlowEffectCVar);
+        float glow = Read<float>(kDayNightGlow);
+        if (glowCVar && Read<int32_t>(glowCVar + kCVarInt) != 0 && std::isfinite(glow))
+            out.glow = std::clamp(glow, 0.0f, 1.0f);
+    }
     out.farClip = out.proj[14] / (1.0f - out.proj[10]);
     if (!(out.farClip > 10.0f && out.farClip < 100000.0f))
     {

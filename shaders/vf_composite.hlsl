@@ -9,7 +9,8 @@
 
 float4 cComposite : register(c9);   // x = exposure, y = god-ray strength, z = debug view, w = blend mode (above)
 float4 cRayColor  : register(c10);  // rgb = god-ray colour
-float4 cSunPx     : register(c11);  // xy = sun position in render-target pixels, z = sun marker enabled
+float4 cSunPx     : register(c11);  // xy = sun position in render-target pixels, z = sun marker enabled,
+                                    // w = the client's glow amount to compensate (0 = none)
 
 sampler2D sDepth : register(s0);
 sampler2D sFog   : register(s1);
@@ -70,8 +71,12 @@ float4 main(float2 vpos : VPOS) : COLOR0
     [branch] if (cComposite.w > 0.5 && cComposite.w < 1.5)
     {
         float3 scene = pow(tex2Dlod(sScene, float4(uv, 0, 0)).rgb, 2.2);
-        float3 c = RollOff(scene * (1 - fog.a) + fog.rgb, max(kKnee, scene));
-        return float4(pow(c, 1 / 2.2) + rays, 1);
+        float3 c = pow(RollOff(scene * (1 - fog.a) + fog.rgb, max(kKnee, scene)), 1 / 2.2);
+        // The client's glow runs after the fog and adds g * blur^2, which bleaches bright fog to white. On fogged
+        // pixels, solve c' + g c'^2 = c so the fog lands on screen as composited.
+        [branch] if (cSunPx.w > 0)
+            c = lerp(c, (sqrt(1 + 4 * cSunPx.w * c) - 1) / (2 * cSunPx.w), fog.a);
+        return float4(c + rays, 1);
     }
     // Fixed-function blend: premultiplied fog, rolled off per channel like the linear path.
     float a = max(fog.a, 1e-4);

@@ -30,15 +30,24 @@ data is Classic-derived; keep it in private repositories.
 - **Distance haze** that thickens toward the horizon and fades with altitude, tinted by the zone's
   stock fog colour.
 - **Ground mist** that hugs the terrain around the player; zones with short stock fog get more.
-- **Distance fog** that replaces the stock linear fog: it turns opaque where the stock fog did, is lit by
-  the direct light (warm at sunset), and fades into a horizon band on the sky.
+- **Distance fog** that replaces the stock linear fog on maps without Classic data: it turns opaque where
+  the stock fog did, is lit by the direct light (warm at sunset), and fades into a horizon band on the sky.
+  With Classic layers the geometry near the far clip fades into the sky column instead.
 - **Forward scattering** around the sun or moon (Henyey–Greenstein phase).
 - **Light shafts**: in-scattering is shadowed by a screen-space march toward the light, so trees,
   buildings and terrain cast shafts into the fog.
 - **God rays** (optional): a radial blur of the bright sky around the sun.
 
-The effect is composited over the world before glow and the UI. While it draws, the stock fog is pushed
-out of range for the world render and restored afterwards; a frame the effect skips keeps the stock fog.
+The effect is composited over the world before glow and the UI. The client's glow (`screen + g·blur²`, with
+`g` from the day/night light) runs afterwards and would bleach bright fog to white, so fogged pixels are
+pre-compensated with the live glow amount. While the effect draws, the stock fog is pushed out of range for
+the world render and restored afterwards; a frame the effect skips keeps the stock fog.
+
+**View distance.** Ascension's Extensions.dll detours the far-clip clamp (`0x780770`) and caps maps 0, 1, 530
+and 571 at 791.66 yd; the engine allows 1583.33 and instances use it. With `FarClipMax` set, the DLL's calls
+to the clamp (`0x780810` when the `farclip` CVar is set, `0x781444` on map load) lift that cap. Terrain
+loading, the chunk pool, the WDL horizon and the fog follow the far clip; placed objects keep their own
+size-class culling (`environmentDetail`), and creatures the server's visibility distance.
 
 ## How it attaches
 
@@ -47,7 +56,7 @@ out of range for the world render and restored afterwards; a frame the effect sk
 | Loader | `version.dll` proxy (all 17 exports forward lazily to the system copy). Its static import loads `CoAVolFog.dll` before the client starts. |
 | D3D9 | The client resolves `Direct3DCreate9` through the delay-loaded `GetProcAddress` slot `[0xB2ED98]`. The DLL points that slot at a filter that returns a wrapped `IDirect3D9`. No d3d9 code is patched, so DXVK or other `d3d9.dll` builds keep working underneath. |
 | Depth | The wrapper creates the device without auto depth and binds an `INTZ` texture as the depth-stencil, which the client caches as its world depth. MSAA is reported unavailable and forced off; `D3DCREATE_PUREDEVICE` is removed. The client draws the world with viewport depth `[0, 0.94]` (`[0xADEEE4]`, set at `0x4F9019`), the distant WDL terrain into `[0.998, 0.999]` with its own projection, and leaves the sky at the clear depth 1; the shaders read depth through the captured world viewport's range and treat anything deeper as beyond the far clip. |
-| Hooks | Four 5-byte call displacements: the world render call (`0x4FB03D`, stock-fog override and restore), after the opaque M2 pass (`0x4F911D`, records the world viewport and matrices), the liquid surface pass (`0x4F9170`, depth writes forced on so water is fogged by its own distance) and before the frame effects (`0x4F9281`, renders the fog). The original bytes are checked first; on any mismatch nothing is patched. |
+| Hooks | Four 5-byte call displacements: the world render call (`0x4FB03D`, stock-fog override and restore), after the opaque M2 pass (`0x4F911D`, records the world viewport and matrices), the liquid surface pass (`0x4F9170`, depth writes forced on so water is fogged by its own distance) and before the frame effects (`0x4F9281`, renders the fog). The original bytes are checked first; on any mismatch nothing is patched. Two more retarget the far-clip clamp calls (`0x780810`, `0x781444`) when `FarClipMax` is set at start-up, independently of the fog hooks. |
 | State | Every state the passes touch is captured with a recorded state block and restored, plus render targets, depth and stream 0 (whose offset state blocks drop). The client's shader-constant cache stays valid. |
 
 Engine inputs (all static addresses in the 12340 image):
@@ -128,7 +137,9 @@ writes `CoAVolFog.log` next to itself.
 | `SunScatter`, `Ambient`, `Exposure` | 1, 1, 1 | Light in the fog |
 | `ClassicExposure` | 1 | Brightness of the Classic layers (1 = as authored) |
 | `LightShafts` | 1 | Shadowed in-scattering |
-| `GodRays` | 0.2 | Radial sky rays, 0 = off |
+| `GodRays` | 0 | Radial sky rays, 0 = off |
+| `GlowCompensation` | 1 | Pre-compensate the fog for the client's glow |
+| `FarClipMax` | 1583 | Continent view distance up to 1583 yd, within the `farclip` setting (0 = Ascension's 791 cap). Switching it on or off needs a restart; values apply at the next `farclip` change or map load |
 | `MaxDistance` | 5000 | Fog range: sky integration length and the Classic distance-curve scale |
 | `Temporal` | 0.85 | History weight, 0 = off |
 | `Underwater` | 0 | Keep the effect under water |
@@ -151,8 +162,10 @@ writes `CoAVolFog.log` next to itself.
   Pixels beyond the far clip below the horizon are marched as level rays so they meet the sky at eye level.
 - The modern fog path applies no exposure or tonemap and its frame is graded with a clamp and a LUT; the
   LUT (and the modern lighting and bloom) are not reproduced, so colours still differ from Classic.
-- The distance fog (`FarFog`) has no modern counterpart: it stands in for the stock fog up to the
-  3.3.5 far clip, which is far shorter than the modern client's.
+- The distance fog (`FarFog`, maps without Classic data) has no modern counterpart: it stands in for the
+  stock fog up to the 3.3.5 far clip, which is far shorter than the modern client's.
+- `FarClipMax` raises memory use (about four times the loaded terrain in a 32-bit process); Ascension's
+  reason for the continent cap is unknown. Without the key in the INI it stays off.
 - Classic data covers the lights the Classic `Light` table references (slot 0, clear weather); zone
   lights, weather/underwater/death slots and noise modulation are not used yet.
 - Not implemented from the kit: the froxel pipeline (M3), fitted fog for transparents (M6), in-game CVars.

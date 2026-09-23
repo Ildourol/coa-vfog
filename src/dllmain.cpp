@@ -45,6 +45,7 @@ void Attach(HMODULE module)
         return;
     }
     AllowFog(InstallEngineHooks());
+    InstallFarClipHooks();
 }
 }
 

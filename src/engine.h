@@ -26,6 +26,8 @@ struct FrameInputs
     // The zone's own fog distance (light float band 0) before the far clip caps it into fogEnd.
     float zoneFogDistance;
     float farClip;
+    // The client's full-screen glow, applied after the fog as screen + glow * blur^2; 0 when it is off.
+    float glow;
     bool inLiquid;
     int mapId;
 };
@@ -45,6 +47,12 @@ constexpr uintptr_t kLiquidSurfaceSite = 0x004F9170;
 constexpr uintptr_t kLiquidSurfaceTarget = 0x0077F020;
 constexpr uintptr_t kWorldDoneSite = 0x004F9281;
 constexpr uintptr_t kWorldDoneTarget = 0x008C1010;
+
+// The far-clip clamp, called with (farclip CVar value, map id) when the CVar is set (0x00780800) and on map load
+// (0x00781430). Extensions.dll detours it to cap the continents at 791.66.
+constexpr uintptr_t kFarClipSetSite = 0x00780810;
+constexpr uintptr_t kFarClipMapLoadSite = 0x00781444;
+constexpr uintptr_t kFarClipClamp = 0x00780770;
 
 bool IsSupportedClient();
 void* GameD3DDevice();

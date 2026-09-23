@@ -31,10 +31,6 @@ constexpr float kFarIsotropic = 0.7f;
 constexpr float kFarSun = 0.45f;
 constexpr float kFarAmbient = 0.6f;
 constexpr float kFarSkyFalloff = 10.0f;
-// The Classic far wall sits beyond the 3.3.5 far clip; the distance fog borrows its colours, scaled
-// so its intensity-10 scattering stays in range at the shorter distance.
-constexpr float kFarWallStart = 1000.0f;
-constexpr float kFarWallIntensityScale = 0.1f;
 
 constexpr float kClassicUnits = 0.01f;
 constexpr float kFogRangeMargin = 300.0f;
@@ -161,8 +157,8 @@ void AuthoredLayers(const AuthoredFog& fog, const Config& cfg, const FogParams& 
     }
 }
 
-void DistanceLayer(const FrameInputs& in, const Config& cfg, const FogParams& p, const AuthoredFog* authored,
-                   float sun, const float* fogColor, FogLayer& out)
+void DistanceLayer(const FrameInputs& in, const Config& cfg, const FogParams& p, float sun, const float* fogColor,
+                   FogLayer& out)
 {
     out = FogLayer{};
     float range = p.maxDistance;
@@ -179,27 +175,8 @@ void DistanceLayer(const FrameInputs& in, const Config& cfg, const FogParams& p,
     out.shadowDensity = 1.0f;
     out.skyFalloff = kFarSkyFalloff;
     out.limit = p.farLimit;
-
-    const AuthoredLayer* wall = nullptr;
-    if (authored)
-        for (int i = 0; i < authored->layerCount; ++i)
-            if (authored->layers[i].start >= kFarWallStart)
-                wall = &authored->layers[i];
-    if (wall)
-    {
-        out.g = std::clamp(wall->g, -0.99f, 0.99f);
-        out.isotropic = 0.0f;
-        Scale(wall->emissive, cfg.ambient, out.emissive);
-        Scale(wall->diffuse, 1.0f, out.diffuse);
-        Encode(out.emissive, p.linear);
-        Encode(out.diffuse, p.linear);
-        Scale(out.diffuse, wall->intensity * kFarWallIntensityScale * sun, out.diffuse);
-    }
-    else
-    {
-        Scale(fogColor, kFarAmbient * cfg.ambient, out.emissive);
-        Scale(p.lightColor, kFarSun * sun, out.diffuse);
-    }
+    Scale(fogColor, kFarAmbient * cfg.ambient, out.emissive);
+    Scale(p.lightColor, kFarSun * sun, out.diffuse);
     std::memcpy(out.shadowEmissive, out.emissive, sizeof(out.emissive));
 }
 
@@ -257,17 +234,20 @@ FogParams BuildFogParams(const FrameInputs& in, const Config& cfg, const Authore
 
     // Classic layers scatter the light as authored for the time of day, with no elevation fade (modern
     // injection: diffuse * intensity * HG); only shadowed layers react to the light setting, through shadowLight.
+    // They need no distance fog of ours: the horizon fade hides the far clip, as the modern client has no other
+    // fog term within view range.
     if (p.authored)
     {
         AuthoredLayers(*authored, cfg, p, cfg.sunScatter, p.layers);
         HaloColor(*authored, p.rayColor);
+        p.layers[3] = FogLayer{};
+        Unbounded(p.layers[3]);
     }
     else
     {
         DerivedLayers(in, cfg, p, sun, fogDistance, fogColor, p.layers);
+        DistanceLayer(in, cfg, p, sun, fogColor, p.layers[3]);
     }
-    DistanceLayer(in, cfg, p, p.authored ? authored : nullptr, p.authored ? cfg.sunScatter : sun, fogColor,
-                  p.layers[3]);
     return p;
 }
 void Mul4x4(const float* a, const float* b, float* out)

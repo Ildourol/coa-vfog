@@ -30,7 +30,7 @@ private:
     bool Skip(const char* reason);
     void LogLightChange(const FrameInputs& in, const AuthoredFog& fog, bool authored);
     void LogProbe(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DTexture9* fog,
-                  const D3DVIEWPORT9& vp, float worldDepthLimit);
+                  const D3DVIEWPORT9& vp, float worldDepthLimit, float dayFraction);
     void DrawFullscreen(IDirect3DDevice9* dev);
     void BindTexture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseTexture9* tex, bool linear);
     bool RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DSurface9* target,

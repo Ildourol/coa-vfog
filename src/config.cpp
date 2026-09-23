@@ -59,9 +59,10 @@ bool ConfigStore::ReloadIfChanged()
     m_config.enable = enable;
     m_config.hooks = hooks;
     VF_LOG_INFO("config reloaded: density=%.2f haze=%.2f ground=%.2f far=%.2f stockfog=%d sun=%.2f rays=%.2f "
-                "quality=%d debug=%d",
+                "glow=%d farclipmax=%.0f quality=%d debug=%d",
                 m_config.density, m_config.haze, m_config.groundFog, m_config.farFog, m_config.stockFog,
-                m_config.sunScatter, m_config.godRays, m_config.quality, m_config.debugView);
+                m_config.sunScatter, m_config.godRays, m_config.glowCompensation ? 1 : 0, m_config.farClipMax,
+                m_config.quality, m_config.debugView);
     return true;
 }
 
@@ -85,6 +86,10 @@ void ConfigStore::Read()
     c.classicExposure = ReadFloat(p, "ClassicExposure", c.classicExposure, 0.0f, 10.0f);
     c.lightShafts = ReadInt(p, "LightShafts", 1, 0, 1) != 0;
     c.godRays = ReadFloat(p, "GodRays", c.godRays, 0.0f, 4.0f);
+    c.glowCompensation = ReadInt(p, "GlowCompensation", 1, 0, 1) != 0;
+    c.farClipMax = ReadFloat(p, "FarClipMax", c.farClipMax, 0.0f, kEngineFarClipMax);
+    if (c.farClipMax < kEngineFarClipMin)
+        c.farClipMax = 0.0f;
     c.maxDistance = ReadFloat(p, "MaxDistance", c.maxDistance, 200.0f, 5000.0f);
     c.temporal = ReadFloat(p, "Temporal", c.temporal, 0.0f, 0.97f);
     c.underwater = ReadInt(p, "Underwater", 0, 0, 1) != 0;
