@@ -17,11 +17,13 @@ struct Config
     float sunScatter = 1.0f;
     float ambient = 1.0f;
     float exposure = 1.0f;
+    float classicExposure = 0.6f;
     bool lightShafts = true;
-    float godRays = 0.35f;
+    float godRays = 0.2f;
     float maxDistance = 5000.0f;
     float temporal = 0.85f;
     bool underwater = false;
+    bool liquidDepth = true;
     int debugView = 0;
     bool sunMarker = false;
     int logLevel = 1;

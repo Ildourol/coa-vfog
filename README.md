@@ -45,7 +45,7 @@ out of range for the world render and restored afterwards; a frame the effect sk
 | Loader | `version.dll` proxy (all 17 exports forward lazily to the system copy). Its static import loads `CoAVolFog.dll` before the client starts. |
 | D3D9 | The client resolves `Direct3DCreate9` through the delay-loaded `GetProcAddress` slot `[0xB2ED98]`. The DLL points that slot at a filter that returns a wrapped `IDirect3D9`. No d3d9 code is patched, so DXVK or other `d3d9.dll` builds keep working underneath. |
 | Depth | The wrapper creates the device without auto depth and binds an `INTZ` texture as the depth-stencil, which the client caches as its world depth. MSAA is reported unavailable and forced off; `D3DCREATE_PUREDEVICE` is removed. |
-| Hooks | Three 5-byte call displacements: the world render call (`0x4FB03D`, stock-fog override and restore), after the opaque M2 pass (`0x4F911D`, records the world viewport and matrices) and before the frame effects (`0x4F9281`, renders the fog). The original bytes are checked first; on any mismatch nothing is patched. |
+| Hooks | Four 5-byte call displacements: the world render call (`0x4FB03D`, stock-fog override and restore), after the opaque M2 pass (`0x4F911D`, records the world viewport and matrices), the liquid surface pass (`0x4F9170`, depth writes forced on so water is fogged by its own distance) and before the frame effects (`0x4F9281`, renders the fog). The original bytes are checked first; on any mismatch nothing is patched. |
 | State | Every state the passes touch is captured with a recorded state block and restored, plus render targets, depth and stream 0 (whose offset state blocks drop). The client's shader-constant cache stays valid. |
 
 Engine inputs (all static addresses in the 12340 image):
@@ -119,11 +119,13 @@ writes `CoAVolFog.log` next to itself.
 | `DataMode` | 1 | 1 Classic layers where available, 0 derived layers everywhere |
 | `ColorSpace` | 1 | 1 linear light with highlight roll-off, 0 gamma |
 | `SunScatter`, `Ambient`, `Exposure` | 1, 1, 1 | Light in the fog |
+| `ClassicExposure` | 0.6 | Brightness of the Classic layers (HDR-authored scatter intensities) |
 | `LightShafts` | 1 | Shadowed in-scattering |
-| `GodRays` | 0.35 | Radial sky rays, 0 = off |
+| `GodRays` | 0.2 | Radial sky rays, 0 = off |
 | `MaxDistance` | 5000 | Fog range: sky integration length and the Classic distance-curve scale |
 | `Temporal` | 0.85 | History weight, 0 = off |
 | `Underwater` | 0 | Keep the effect under water |
+| `LiquidDepth` | 1 | Water surfaces write depth while the fog draws |
 | `DebugView` | 0 | 1 radiance, 2 transmittance, 3 linear depth |
 | `SunMarker` | 0 | Red dot where the light direction projects |
 | `LogLevel` | 1 | 0 errors, 1 info, 2 debug |
@@ -138,7 +140,10 @@ writes `CoAVolFog.log` next to itself.
 - Transparent effects, particles and water are fogged by the opaque depth behind them (kit IP-B), so
   near effects in front of the sky are dimmed slightly.
 - Interiors get the outdoor layers; the `gxApi d3d9ex` path is not wrapped (fog stays off there).
-- Water does not write depth, so distant water is fogged by what lies behind it (sea floor or sky).
+- Water surfaces write depth only in the outdoor liquid pass; WMO liquids (city canals) still do not.
+  Pixels without depth below the horizon are marched as level rays so they meet the sky at eye level.
+- The modern client's exposure and tonemap were not recovered; `ClassicExposure` and a hue-preserving
+  luminance roll-off approximate them.
 - Classic data covers the lights the Classic `Light` table references (slot 0, clear weather); zone
   lights, weather/underwater/death slots and noise modulation are not used yet.
 - Not implemented from the kit: the froxel pipeline (M3), fitted fog for transparents (M6), in-game CVars.

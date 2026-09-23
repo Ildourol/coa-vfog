@@ -437,9 +437,13 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
     const float rayStrength = cfg.godRays * fog.lightVisibility * sunScreenFade;
     const bool rays = rayStrength > 0.005f;
 
-    if (m_logged < 1 || (LogEnabled(LogLevel::Debug) && m_frame % 600u == 0))
+    const bool viewChanged = std::fabs(in.farClip - m_loggedFarClip) > 1.0f || vp.Width != m_loggedViewport.Width ||
+                             vp.Height != m_loggedViewport.Height;
+    if (m_logged < 1 || viewChanged || (LogEnabled(LogLevel::Debug) && m_frame % 600u == 0))
     {
         ++m_logged;
+        m_loggedFarClip = in.farClip;
+        m_loggedViewport = vp;
         float n = -P[14] / (1.0f + P[10]);
         float f = P[14] / (1.0f - P[10]);
         VF_LOG_INFO("frame %u: viewport %lu,%lu %lux%lu of %ux%u; near %.3f far %.1f (farclip %.1f) maxdist %.0f",
@@ -565,7 +569,8 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
                         D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE);
     dev->SetPixelShader(m_composite);
     const Float4 composite[3] = {
-        {cfg.exposure, rays ? rayStrength : 0.0f, static_cast<float>(cfg.debugView), fog.linear ? 1.0f : 0.0f},
+        {fog.authored ? cfg.classicExposure : cfg.exposure, rays ? rayStrength : 0.0f, static_cast<float>(cfg.debugView),
+         fog.linear ? 1.0f : 0.0f},
         {fog.rayColor[0], fog.rayColor[1], fog.rayColor[2], 0.0f},
         {sunPx[0], sunPx[1], cfg.sunMarker && sunInFront ? 1.0f : 0.0f, 0.0f},
     };

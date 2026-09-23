@@ -18,6 +18,7 @@
 extern "C" __declspec(dllimport) IDirect3D9* __cdecl vf_test_wrap_direct3d9(IDirect3D9*(WINAPI*)(UINT), UINT);
 extern "C" __declspec(dllimport) void __cdecl vf_test_set_config(const Config*);
 extern "C" __declspec(dllimport) int __cdecl vf_test_render(const FrameInputs*, const char**);
+extern "C" __declspec(dllimport) void __cdecl vf_test_force_depth_write(int);
 
 namespace
 {
@@ -826,6 +827,40 @@ int Run(const std::wstring& outDir, const std::string& dataPath)
         Image classicImage = Capture(h.dev);
         h.dev->EndScene();
         SavePng(outDir + L"\\after-classic.png", classicImage.w, classicImage.h, classicImage.bgra);
+
+        // Facing the sun with it just above the view, as in an in-game report of an over-bright sky.
+        Vec3 sunAt = Add(eye, {in.toLight[0] * 100.0f, in.toLight[1] * 100.0f, -2.0f});
+        float sunView[16];
+        LookAt(eye, sunAt, sunView);
+        FrameInputs sunIn = MakeInputs(sunView, proj, eye, sunAt, world);
+        sunIn.mapId = 0;
+        sunIn.toLight[2] = 0.45f;
+        float len = std::sqrt(sunIn.toLight[0] * sunIn.toLight[0] + sunIn.toLight[1] * sunIn.toLight[1] + 0.2025f);
+        for (float& v : sunIn.toLight)
+            v /= len;
+        const float variants[][2] = {{1.0f, 1.0f}, {0.6f, 1.0f}, {0.6f, 0.6f}, {0.45f, 0.8f}};
+        for (const auto& v : variants)
+        {
+            Config sunCfg = cfg;
+            sunCfg.dataMode = 1;
+            sunCfg.exposure = v[0];
+            sunCfg.sunScatter = v[1];
+            vf_test_set_config(&sunCfg);
+            for (int frame = 0; frame < 8; ++frame)
+            {
+                h.BeginFrame();
+                h.DrawScene(eye, sunView, proj, world);
+                vf_test_render(&sunIn, &skip);
+                if (frame == 7)
+                {
+                    Image sunImage = Capture(h.dev);
+                    wchar_t name[96];
+                    swprintf(name, 96, L"\\classic-sun-exposure%.2f-sun%.2f.png", v[0], v[1]);
+                    SavePng(outDir + name, sunImage.w, sunImage.h, sunImage.bgra);
+                }
+                h.dev->EndScene();
+            }
+        }
         bool match = resolved;
         const UINT samples[3][2] = {{101, 101}, {1181, 101}, {101, 201}};
         for (const auto& s : samples)
@@ -868,6 +903,25 @@ int Run(const std::wstring& outDir, const std::string& dataPath)
         float got = depthView.At(px, py)[2] / 255.0f;
         std::printf("     ground view depth: expected %.2f yd, shader %.2f yd\n", viewZ, got * 255.0f);
         Check(std::fabs(got - expected) < 2.5f / 255.0f, "depth linearisation matches the scene geometry");
+    }
+
+    {
+        DWORD before = 0;
+        DWORD forced = 0;
+        DWORD during = 0;
+        DWORD after = 0;
+        h.dev->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+        h.dev->GetRenderState(D3DRS_ZWRITEENABLE, &before);
+        vf_test_force_depth_write(1);
+        h.dev->GetRenderState(D3DRS_ZWRITEENABLE, &forced);
+        h.dev->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+        h.dev->GetRenderState(D3DRS_ZWRITEENABLE, &during);
+        h.dev->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
+        h.dev->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+        vf_test_force_depth_write(0);
+        h.dev->GetRenderState(D3DRS_ZWRITEENABLE, &after);
+        Check(before == FALSE && forced == TRUE && during == TRUE && after == FALSE,
+              "liquid-pass depth writes stay on while forced and the client's last request is restored");
     }
 
     Config restored = cfg;

@@ -75,6 +75,11 @@ extern "C" void __cdecl vf_test_set_config(const Config* cfg)
     GlobalConfig().Override(*cfg);
 }
 
+extern "C" void __cdecl vf_test_force_depth_write(int force)
+{
+    ForceDepthWrite(ActiveFogDevice(), force != 0);
+}
+
 extern "C" int __cdecl vf_test_render(const FrameInputs* in, const char** skipReason)
 {
     return RenderFog(ActiveFogDevice(), *in, GlobalConfig().Get(), skipReason) ? 1 : 0;

@@ -76,16 +76,20 @@ float4 main(float2 vpos : VPOS) : COLOR0
     float rayLen = length(ray);
     float3 V = ray / rayLen;
     float d = SampleDepth(sDepth, pc);
+    float sky = d >= cDepthLin.w ? 1 : 0;
     float z = LinearDepth(d);
-    z = lerp(z, cDepthLin.z, smoothstep(cMarch.z, cMarch.w, z));
+    float horizon = max(sky, smoothstep(cMarch.z, cMarch.w, z));
+    z = lerp(z, cDepthLin.z, horizon);
     float tMax = min(z * rayLen, cDepthLin.z);
 
     float jitter = cMarch.x > 0 ? frac(InterleavedGradientNoise(vpos) + cLow.y * 0.618034) : 0.5;
     float3 camW = cInvView[3].xyz;
     float3 dirW = mul(V, (float3x3)cInvView);
     float cosT = dot(cToLight.xyz, V);
-    float sky = d >= cDepthLin.w ? 1 : 0;
     float up = max(dirW.z, 0);
+    // Pixels without depth below the horizon (beyond the far clip, or water that wrote none) and geometry
+    // fading into the horizon are marched as level rays, so they meet the sky at eye level seamlessly.
+    float dirZ = lerp(dirW.z, up, horizon);
 
     float phase[4];
     float scale[4];
@@ -108,7 +112,7 @@ float4 main(float2 vpos : VPOS) : COLOR0
         float tb = tMax * u1 * u1;
         float dt = tb - ta;
         float t = lerp(ta, tb, jitter);
-        float h = camW.z + dirW.z * t;
+        float h = camW.z + dirZ * t;
         float vis = 1;
         [branch] if (cShadow.z > 0)
             vis = SunVisibility(V * t, t, jitter);

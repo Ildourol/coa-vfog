@@ -45,6 +45,15 @@ public:
     IDirect3DDevice9* Real() const { return m_real; }
     bool CreateDepth();
     bool Render(const FrameInputs& in, const Config& cfg, const char** skip);
+    // While forced, depth writes stay on regardless of what the client requests; the client's last
+    // request is re-applied when forcing ends, so its state cache stays accurate.
+    void ForceDepthWrite(bool force)
+    {
+        if (force == m_forceDepthWrite)
+            return;
+        m_forceDepthWrite = force;
+        m_real->SetRenderState(D3DRS_ZWRITEENABLE, force ? TRUE : m_engineDepthWrite);
+    }
 
     // IUnknown
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override;
@@ -215,6 +224,12 @@ public:
     HRESULT STDMETHODCALLTYPE GetClipPlane(DWORD i, float* p) override { return m_real->GetClipPlane(i, p); }
     HRESULT STDMETHODCALLTYPE SetRenderState(D3DRENDERSTATETYPE s, DWORD v) override
     {
+        if (s == D3DRS_ZWRITEENABLE)
+        {
+            m_engineDepthWrite = v;
+            if (m_forceDepthWrite)
+                v = TRUE;
+        }
         return m_real->SetRenderState(s, v);
     }
     HRESULT STDMETHODCALLTYPE GetRenderState(D3DRENDERSTATETYPE s, DWORD* v) override
@@ -429,6 +444,8 @@ private:
     bool BindFallbackDepth();
 
     LONG m_ref = 1;
+    DWORD m_engineDepthWrite = TRUE;
+    bool m_forceDepthWrite = false;
     WrappedD3D9* m_parent;
     IDirect3DDevice9* m_real;
     bool m_fog;
@@ -782,6 +799,12 @@ FogDevice* FindFogDevice(void* gameDevice)
 IDirect3DDevice9* RealDevice(FogDevice* device)
 {
     return device ? device->Real() : nullptr;
+}
+
+void ForceDepthWrite(FogDevice* device, bool force)
+{
+    if (device)
+        device->ForceDepthWrite(force);
 }
 
 bool RenderFog(FogDevice* device, const FrameInputs& in, const Config& cfg, const char** skipReason)

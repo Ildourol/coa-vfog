@@ -17,6 +17,8 @@ constexpr float kStockFogAway = 50000.0f;
 
 uintptr_t g_worldRenderTarget = engine::kWorldRenderTarget;
 uintptr_t g_opaqueDoneTarget = engine::kOpaqueDoneTarget;
+uintptr_t g_liquidSurfaceTarget = engine::kLiquidSurfaceTarget;
+FogDevice* g_liquidDevice = nullptr;
 uintptr_t g_worldDoneTarget = engine::kWorldDoneTarget;
 bool g_failed = false;
 bool g_renderedLastFrame = false;
@@ -79,8 +81,25 @@ void OnFrameBegin()
     g_stockFogPushed = true;
 }
 
+// Water writes no depth in the stock client; while the fog draws, the liquid surface pass writes it so
+// water is fogged by its own distance instead of by the sea floor or the sky behind it.
+void OnLiquidBegin()
+{
+    if (g_failed || !g_renderedLastFrame || !GlobalConfig().Get().liquidDepth)
+        return;
+    g_liquidDevice = GameFogDevice();
+    ForceDepthWrite(g_liquidDevice, true);
+}
+
+void OnLiquidEnd()
+{
+    ForceDepthWrite(g_liquidDevice, false);
+    g_liquidDevice = nullptr;
+}
+
 void OnFrameEnd()
 {
+    OnLiquidEnd();
     if (g_stockFogPushed)
     {
         engine::WriteStockFog(g_savedStockFog);
@@ -192,6 +211,30 @@ extern "C" void __cdecl vf_on_frame_end()
     }
 }
 
+extern "C" void __cdecl vf_on_liquid_begin()
+{
+    __try
+    {
+        OnLiquidBegin();
+    }
+    __except (GuardFilter(GetExceptionCode(), "liquid begin hook"))
+    {
+        g_failed = true;
+    }
+}
+
+extern "C" void __cdecl vf_on_liquid_end()
+{
+    __try
+    {
+        OnLiquidEnd();
+    }
+    __except (GuardFilter(GetExceptionCode(), "liquid end hook"))
+    {
+        g_failed = true;
+    }
+}
+
 extern "C" void __cdecl vf_on_opaque_done()
 {
     __try
@@ -244,6 +287,21 @@ __declspec(naked) static void OpaqueDoneThunk()
     }
 }
 
+// 0x4F9170: the liquid surface pass (no arguments), outside liquid only.
+__declspec(naked) static void LiquidSurfaceThunk()
+{
+    __asm {
+        pushad
+        call vf_on_liquid_begin
+        popad
+        call dword ptr [g_liquidSurfaceTarget]
+        pushad
+        call vf_on_liquid_end
+        popad
+        ret
+    }
+}
+
 // 0x4F9281: FFX end, no arguments. Runs the fog before the glow and screen effects, then tail-calls it.
 __declspec(naked) static void WorldDoneThunk()
 {
@@ -278,6 +336,7 @@ bool InstallEngineHooks()
     const CallSite sites[] = {
         {engine::kWorldRenderSite, engine::kWorldRenderTarget, &WorldRenderThunk},
         {engine::kOpaqueDoneSite, engine::kOpaqueDoneTarget, &OpaqueDoneThunk},
+        {engine::kLiquidSurfaceSite, engine::kLiquidSurfaceTarget, &LiquidSurfaceThunk},
         {engine::kWorldDoneSite, engine::kWorldDoneTarget, &WorldDoneThunk},
     };
     for (const CallSite& s : sites)
@@ -300,8 +359,9 @@ bool InstallEngineHooks()
         ++patched;
     }
     *slot = &GetProcAddressFilter;
-    VF_LOG_INFO("engine hooks installed: GetProcAddress filter, world render 0x%08X, opaque 0x%08X, world done 0x%08X",
+    VF_LOG_INFO("engine hooks installed: GetProcAddress filter, world render 0x%08X, opaque 0x%08X, liquid 0x%08X, "
+                "world done 0x%08X",
                 static_cast<unsigned>(engine::kWorldRenderSite), static_cast<unsigned>(engine::kOpaqueDoneSite),
-                static_cast<unsigned>(engine::kWorldDoneSite));
+                static_cast<unsigned>(engine::kLiquidSurfaceSite), static_cast<unsigned>(engine::kWorldDoneSite));
     return true;
 }

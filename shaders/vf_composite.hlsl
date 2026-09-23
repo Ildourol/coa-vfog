@@ -9,11 +9,16 @@ sampler2D sDepth : register(s0);
 sampler2D sFog   : register(s1);
 sampler2D sRays  : register(s2);
 
-// Rolls highlights above the knee off toward 1 so HDR scattering (intensities up to 10) stays in range.
-float3 Shoulder(float3 x)
+// Compresses HDR scattering (Classic intensities reach 10) by luminance so the hue survives: the brightness
+// rolls off toward 1 above the knee, and only colours that still leave the gamut are desaturated.
+float3 ToneMap(float3 c)
 {
-    const float knee = 0.6;
-    return x <= knee ? x : knee + (1 - knee) * (1 - exp(-(x - knee) / (1 - knee)));
+    const float knee = 0.45;
+    float l = dot(c, float3(0.2126, 0.7152, 0.0722));
+    float lt = l <= knee ? l : knee + (1 - knee) * (1 - exp(-(l - knee) / (1 - knee)));
+    float3 r = c * (lt / max(l, 1e-5));
+    float m = max(r.r, max(r.g, r.b));
+    return m > 1 ? lt + (r - lt) * ((1 - lt) / max(m - lt, 1e-5)) : r;
 }
 
 float4 main(float2 vpos : VPOS) : COLOR0
@@ -42,7 +47,7 @@ float4 main(float2 vpos : VPOS) : COLOR0
     [branch] if (cComposite.w > 0)
     {
         float a = max(fog.a, 1e-4);
-        fog.rgb = pow(Shoulder(fog.rgb / a), 1.0 / 2.2) * fog.a;
+        fog.rgb = pow(ToneMap(fog.rgb / a), 1.0 / 2.2) * fog.a;
     }
 
     float3 rays = 0;

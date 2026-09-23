@@ -62,6 +62,8 @@ private:
     unsigned m_frame = 0;
     unsigned m_logged = 0;
     bool m_lightsLogged = false;
+    float m_loggedFarClip = 0.0f;
+    D3DVIEWPORT9 m_loggedViewport = {};
     uint32_t m_lightSignature = 0;
     const char* m_skip = "";
 };

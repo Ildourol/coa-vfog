@@ -41,6 +41,8 @@ constexpr uintptr_t kWorldRenderSite = 0x004FB03D;
 constexpr uintptr_t kWorldRenderTarget = 0x004F8EA0;
 constexpr uintptr_t kOpaqueDoneSite = 0x004F911D;
 constexpr uintptr_t kOpaqueDoneTarget = 0x00823CB0;
+constexpr uintptr_t kLiquidSurfaceSite = 0x004F9170;
+constexpr uintptr_t kLiquidSurfaceTarget = 0x0077F020;
 constexpr uintptr_t kWorldDoneSite = 0x004F9281;
 constexpr uintptr_t kWorldDoneTarget = 0x008C1010;
 

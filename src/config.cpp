@@ -82,11 +82,13 @@ void ConfigStore::Read()
     c.sunScatter = ReadFloat(p, "SunScatter", c.sunScatter, 0.0f, 10.0f);
     c.ambient = ReadFloat(p, "Ambient", c.ambient, 0.0f, 10.0f);
     c.exposure = ReadFloat(p, "Exposure", c.exposure, 0.0f, 10.0f);
+    c.classicExposure = ReadFloat(p, "ClassicExposure", c.classicExposure, 0.0f, 10.0f);
     c.lightShafts = ReadInt(p, "LightShafts", 1, 0, 1) != 0;
     c.godRays = ReadFloat(p, "GodRays", c.godRays, 0.0f, 4.0f);
     c.maxDistance = ReadFloat(p, "MaxDistance", c.maxDistance, 200.0f, 5000.0f);
     c.temporal = ReadFloat(p, "Temporal", c.temporal, 0.0f, 0.97f);
     c.underwater = ReadInt(p, "Underwater", 0, 0, 1) != 0;
+    c.liquidDepth = ReadInt(p, "LiquidDepth", 1, 0, 1) != 0;
     c.debugView = ReadInt(p, "DebugView", 0, 0, 3);
     c.sunMarker = ReadInt(p, "SunMarker", 0, 0, 1) != 0;
     c.logLevel = ReadInt(p, "LogLevel", c.logLevel, 0, 2);
