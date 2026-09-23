@@ -45,6 +45,8 @@ constexpr uint32_t kFlagRelativeHeights = 0x2;
 constexpr float kDerivedRange = 1500.0f;
 
 constexpr float kMoonLight = 0.35f;
+// Half-width, in toLight.z, of the band in which the light sets below the horizon.
+constexpr float kHorizonBand = 0.02f;
 constexpr float kReferenceFarTarget = 200.0f;
 constexpr float kNoLimit = 1.0e9f;
 
@@ -165,9 +167,9 @@ void DistanceLayer(const FrameInputs& in, const Config& cfg, const FogParams& p,
     out = FogLayer{};
     float range = p.maxDistance;
     float farStart = std::min(std::max(in.fogStart, 0.0f), p.farLimit * kFarStartFraction);
-    float us = farStart / range;
-    float uf = p.farLimit / range;
-    float shape = range * ((uf - us) + kFarRamp * (uf * uf * uf - us * us * us) / 3.0f);
+    // Optical depth per unit density from the start to the limit, with the curve measured from the start.
+    float u = (p.farLimit - farStart) / range;
+    float shape = range * (u + kFarRamp * u * u * u / 3.0f);
     out.start = farStart;
     out.density = cfg.stockFog == 1 && shape > 0.0f ? kFarOpticalDepth * cfg.farFog * cfg.density / shape : 0.0f;
     out.g = kFarG;
@@ -200,6 +202,24 @@ void DistanceLayer(const FrameInputs& in, const Config& cfg, const FogParams& p,
     }
     std::memcpy(out.shadowEmissive, out.emissive, sizeof(out.emissive));
 }
+
+// God rays take the hue of the Classic halo (the most forward-scattering layer) rather than the pale sun disc.
+// Like the sun colour they replace, it stays display-referred: the rays are a display-space overlay.
+bool HaloColor(const AuthoredFog& fog, float* out)
+{
+    const AuthoredLayer* halo = nullptr;
+    for (int i = 0; i < fog.layerCount; ++i)
+        if (!halo || fog.layers[i].g > halo->g)
+            halo = &fog.layers[i];
+    if (!halo)
+        return false;
+    const float* c = halo->diffuse;
+    float peak = std::max(c[0], std::max(c[1], c[2]));
+    if (peak < 1e-4f)
+        return false;
+    Scale(c, 1.0f / peak, out);
+    return true;
+}
 }
 
 void UnpackColor(uint32_t argb, float* rgb)
@@ -223,6 +243,8 @@ FogParams BuildFogParams(const FrameInputs& in, const Config& cfg, const Authore
 
     float elevation = SmoothStep(-0.03f, 0.10f, in.toLight[2]);
     p.lightVisibility = elevation * (in.lightIsMoon ? kMoonLight : 1.0f);
+    p.lightAboveHorizon = SmoothStep(-kHorizonBand, kHorizonBand, in.toLight[2]);
+    p.shadowLight = p.authored ? p.lightAboveHorizon : 1.0f;
     p.farClip = in.farClip;
     p.maxDistance = std::max(cfg.maxDistance, in.farClip);
     p.horizonStart = in.farClip * 0.85f;
@@ -233,12 +255,19 @@ FogParams BuildFogParams(const FrameInputs& in, const Config& cfg, const Authore
     fogDistance = std::clamp(fogDistance, 50.0f, 5000.0f);
     float sun = p.lightVisibility * cfg.sunScatter;
 
+    // Classic layers scatter the light as authored for the time of day, with no elevation fade (modern
+    // injection: diffuse * intensity * HG); only shadowed layers react to the light setting, through shadowLight.
     if (p.authored)
-        AuthoredLayers(*authored, cfg, p, elevation * cfg.sunScatter, p.layers);
+    {
+        AuthoredLayers(*authored, cfg, p, cfg.sunScatter, p.layers);
+        HaloColor(*authored, p.rayColor);
+    }
     else
+    {
         DerivedLayers(in, cfg, p, sun, fogDistance, fogColor, p.layers);
-    DistanceLayer(in, cfg, p, p.authored ? authored : nullptr, p.authored ? elevation * cfg.sunScatter : sun,
-                  fogColor, p.layers[3]);
+    }
+    DistanceLayer(in, cfg, p, p.authored ? authored : nullptr, p.authored ? cfg.sunScatter : sun, fogColor,
+                  p.layers[3]);
     return p;
 }
 void Mul4x4(const float* a, const float* b, float* out)

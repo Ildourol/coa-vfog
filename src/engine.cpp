@@ -12,6 +12,8 @@ namespace
 constexpr uintptr_t kGxDevice = 0x00C5DF88;
 constexpr uintptr_t kGxD3DDevice = 0x397C;
 constexpr uintptr_t kGxProjection = 0xF88;
+// The Gx viewport's minZ/maxZ (stored by 0x681890, uploaded lazily by 0x6A99E0 on the next draw or clear).
+constexpr uintptr_t kGxViewportMinZ = 0xF80;
 constexpr uintptr_t kGxViewIndex = 0x1AF8;
 constexpr uintptr_t kGxViewBase = 0x1B00;
 constexpr uint32_t kGxViewStackDepth = 64;
@@ -31,8 +33,6 @@ constexpr uintptr_t kFogGroupEnd[2] = {0x00D38B94, 0x00D38BA8};
 constexpr uintptr_t kDayFraction = 0x00D38B04;
 constexpr uintptr_t kSkyCenter = 0x00D38B18;
 constexpr uintptr_t kFogColor = 0x00D38BA0;
-constexpr uintptr_t kFogStart = 0x00D38BA4;
-constexpr uintptr_t kFogEnd = 0x00D38BA8;
 constexpr uintptr_t kAmbientColor = 0x00D38BD4;
 constexpr uintptr_t kDirectColor = 0x00D38BD8;
 constexpr uintptr_t kSunColor = 0x00D38BF8;
@@ -96,6 +96,20 @@ bool CaptureOpaqueStateUnsafe(IDirect3DDevice9* device, OpaqueState& state)
 {
     if (FAILED(device->GetViewport(&state.viewport)))
         return false;
+    // The client applies viewports lazily, so the device can still hold the sky pass's depth range
+    // [0.999, 1] when no world draw followed it. The Gx viewport already holds the world's again: the sky
+    // and WDL passes restore it (0x007F0CB3, 0x00796466). Their rectangles match the world's.
+    uintptr_t gx = Read<uintptr_t>(kGxDevice);
+    if (gx)
+    {
+        float z[2];
+        ReadFloats(gx + kGxViewportMinZ, z, 2);
+        if (Finite(z, 2) && z[0] >= 0.0f && z[1] <= 1.0f && z[1] - z[0] > 0.01f)
+        {
+            state.viewport.MinZ = z[0];
+            state.viewport.MaxZ = z[1];
+        }
+    }
     if (!ReadGxMatrices(state.view, state.proj))
     {
         ReadFloats(kViewGlobal, state.view, 16);
@@ -142,8 +156,8 @@ bool BuildFrameInputsUnsafe(FrameInputs& out)
     Normalize(out.toLight);
 
     out.fogColor = Read<uint32_t>(kFogColor);
-    out.fogStart = Read<float>(kFogStart);
-    out.fogEnd = Read<float>(kFogEnd);
+    out.fogStart = Read<float>(kFogGroupStart[kFrameFogGroup]);
+    out.fogEnd = Read<float>(kFogGroupEnd[kFrameFogGroup]);
     out.sunColor = Read<uint32_t>(kSunColor);
     out.directColor = Read<uint32_t>(kDirectColor);
     out.ambientColor = Read<uint32_t>(kAmbientColor);

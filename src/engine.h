@@ -56,6 +56,8 @@ struct StockFog
     float start[2];
     float end[2];
 };
+// The group FrameInputs::fogStart/fogEnd come from.
+constexpr int kFrameFogGroup = 1;
 StockFog ReadStockFog();
 void WriteStockFog(const StockFog& fog);
 

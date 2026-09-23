@@ -38,6 +38,10 @@ struct FogParams
     float lightColor[3];
     float rayColor[3];
     float lightVisibility;
+    // The modern sunAboveHorizon: shadowed Classic layers treat a light below the horizon as shadow.
+    float lightAboveHorizon;
+    // Multiplies the shadow-march visibility of shadowed layers (lightAboveHorizon for Classic layers).
+    float shadowLight;
     float maxDistance;
     float horizonStart;
     float farClip;

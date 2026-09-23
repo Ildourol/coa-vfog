@@ -42,6 +42,7 @@ vf_shader(ps_temporal vf_temporal.hlsl ps_3_0)
 vf_shader(ps_composite vf_composite.hlsl ps_3_0)
 vf_shader(ps_ray_mask vf_ray_mask.hlsl ps_3_0)
 vf_shader(ps_ray_blur vf_ray_blur.hlsl ps_3_0)
+vf_shader(ps_probe vf_probe.hlsl ps_3_0)
 add_custom_target(vf_shaders DEPENDS ${SHADER_HEADERS})
 
 add_library(CoAVolFog SHARED

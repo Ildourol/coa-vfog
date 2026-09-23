@@ -26,8 +26,11 @@ private:
     bool EnsureShaders(IDirect3DDevice9* dev);
     bool EnsureStateBlock(IDirect3DDevice9* dev);
     bool EnsureTargets(IDirect3DDevice9* dev, UINT lowW, UINT lowH, UINT rayW, UINT rayH);
+    bool EnsureSceneCopy(IDirect3DDevice9* dev, IDirect3DSurface9* target, UINT w, UINT h);
     bool Skip(const char* reason);
     void LogLightChange(const FrameInputs& in, const AuthoredFog& fog, bool authored);
+    void LogProbe(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DTexture9* fog,
+                  const D3DVIEWPORT9& vp, float worldDepthLimit);
     void DrawFullscreen(IDirect3DDevice9* dev);
     void BindTexture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseTexture9* tex, bool linear);
     bool RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DSurface9* target,
@@ -39,16 +42,24 @@ private:
     IDirect3DPixelShader9* m_composite = nullptr;
     IDirect3DPixelShader9* m_rayMask = nullptr;
     IDirect3DPixelShader9* m_rayBlur = nullptr;
+    IDirect3DPixelShader9* m_probe = nullptr;
     IDirect3DVertexDeclaration9* m_decl = nullptr;
     IDirect3DStateBlock9* m_state = nullptr;
 
     IDirect3DTexture9* m_marchTarget = nullptr;
     IDirect3DTexture9* m_history[2] = {};
     IDirect3DTexture9* m_rays[2] = {};
+    IDirect3DTexture9* m_scene = nullptr;
+    IDirect3DTexture9* m_probeTarget = nullptr;
+    IDirect3DSurface9* m_probeReadback = nullptr;
     UINT m_lowW = 0;
     UINT m_lowH = 0;
     UINT m_rayW = 0;
     UINT m_rayH = 0;
+    UINT m_sceneW = 0;
+    UINT m_sceneH = 0;
+    bool m_sceneFailed = false;
+    bool m_probeFailed = false;
     bool m_fogFilterable = false;
 
     int m_historyIndex = 0;
@@ -61,8 +72,12 @@ private:
     long long m_prevTicks = 0;
     unsigned m_frame = 0;
     unsigned m_logged = 0;
+    long long m_summaryTicks = 0;
+    long long m_probeTicks = 0;
+    unsigned m_probeAttempts = 0;
     bool m_lightsLogged = false;
     float m_loggedFarClip = 0.0f;
+    float m_loggedBlendMode = -1.0f;
     D3DVIEWPORT9 m_loggedViewport = {};
     uint32_t m_lightSignature = 0;
     const char* m_skip = "";

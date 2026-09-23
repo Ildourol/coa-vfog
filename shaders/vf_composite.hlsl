@@ -1,24 +1,27 @@
-// Depth-aware upsample of the low-res fog onto the world viewport. Blend: ONE, INVSRCALPHA.
+// Depth-aware upsample of the low-res fog onto the world viewport.
+//
+// Linear mode (cComposite.w = 1): the fog is blended over a copy of the scene in linear light,
+// scene * T + L, the way the modern client adds its premultiplied volume to a linear frame. Highlights
+// above a knee roll off per channel, so saturated sunset colours clip toward yellow like the modern frame.
+// Fallback (w = 2, linear fog without a scene copy) and gamma mode (w = 0) use the fixed-function blend
+// ONE, INVSRCALPHA.
 #include "vf_common.hlsli"
 
-float4 cComposite : register(c9);   // x = exposure, y = god-ray strength, z = debug view, w = linear fog radiance
+float4 cComposite : register(c9);   // x = exposure, y = god-ray strength, z = debug view, w = blend mode (above)
 float4 cRayColor  : register(c10);  // rgb = god-ray colour
 float4 cSunPx     : register(c11);  // xy = sun position in render-target pixels, z = sun marker enabled
 
 sampler2D sDepth : register(s0);
 sampler2D sFog   : register(s1);
 sampler2D sRays  : register(s2);
+sampler2D sScene : register(s3);    // the world viewport before the fog (linear mode)
 
-// Compresses HDR scattering (Classic intensities reach 10) by luminance so the hue survives: the brightness
-// rolls off toward 1 above the knee, and only colours that still leave the gamut are desaturated.
-float3 ToneMap(float3 c)
+static const float kKnee = 0.8;
+
+float3 RollOff(float3 x, float3 knee)
 {
-    const float knee = 0.45;
-    float l = dot(c, float3(0.2126, 0.7152, 0.0722));
-    float lt = l <= knee ? l : knee + (1 - knee) * (1 - exp(-(l - knee) / (1 - knee)));
-    float3 r = c * (lt / max(l, 1e-5));
-    float m = max(r.r, max(r.g, r.b));
-    return m > 1 ? lt + (r - lt) * ((1 - lt) / max(m - lt, 1e-5)) : r;
+    float3 span = max(1 - knee, 1e-4);
+    return x <= knee ? x : knee + span * (1 - exp(-(x - knee) / span));
 }
 
 float4 main(float2 vpos : VPOS) : COLOR0
@@ -44,20 +47,18 @@ float4 main(float2 vpos : VPOS) : COLOR0
     }
     float4 fog = acc / wsum;
     fog.rgb *= cComposite.x;
-    [branch] if (cComposite.w > 0)
-    {
-        float a = max(fog.a, 1e-4);
-        fog.rgb = pow(ToneMap(fog.rgb / a), 1.0 / 2.2) * fog.a;
-    }
 
+    // God rays are a display-space overlay on top of the fogged image (their source is the gamma frame).
+    float2 uv = (pc - cRect.xy) / cRect.zw;
     float3 rays = 0;
     [branch] if (cComposite.y > 0)
-        rays = tex2Dlod(sRays, float4((pc - cRect.xy) / cRect.zw, 0, 0)).rgb * cRayColor.rgb * cComposite.y;
+        rays = tex2Dlod(sRays, float4(uv, 0, 0)).rgb * cRayColor.rgb * cComposite.y;
+    const bool linearLight = cComposite.w > 0.5;
 
     [branch] if (cComposite.z > 0.5)
     {
         if (cComposite.z < 1.5)
-            return float4(fog.rgb + rays, 1);
+            return float4((linearLight ? pow(saturate(fog.rgb), 1 / 2.2) : fog.rgb) + rays, 1);
         if (cComposite.z < 2.5)
             return float4((1 - fog.aaa), 1);
         if (cComposite.z < 3.5)
@@ -65,5 +66,17 @@ float4 main(float2 vpos : VPOS) : COLOR0
     }
     [branch] if (cSunPx.z > 0 && distance(pc, cSunPx.xy) < 6)
         return float4(1, 0, 0, 1);
-    return float4(fog.rgb + rays, fog.a);
+
+    [branch] if (cComposite.w > 0.5 && cComposite.w < 1.5)
+    {
+        float3 scene = pow(tex2Dlod(sScene, float4(uv, 0, 0)).rgb, 2.2);
+        float3 c = RollOff(scene * (1 - fog.a) + fog.rgb, max(kKnee, scene));
+        return float4(pow(c, 1 / 2.2) + rays, 1);
+    }
+    // Fixed-function blend: premultiplied fog, rolled off per channel like the linear path.
+    float a = max(fog.a, 1e-4);
+    float3 unit = RollOff(fog.rgb / a, kKnee);
+    if (linearLight)
+        unit = pow(unit, 1 / 2.2);
+    return float4(unit * fog.a + rays, fog.a);
 }

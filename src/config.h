@@ -17,7 +17,7 @@ struct Config
     float sunScatter = 1.0f;
     float ambient = 1.0f;
     float exposure = 1.0f;
-    float classicExposure = 0.6f;
+    float classicExposure = 1.0f;
     bool lightShafts = true;
     float godRays = 0.2f;
     float maxDistance = 5000.0f;

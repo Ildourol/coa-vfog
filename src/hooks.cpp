@@ -135,6 +135,12 @@ void OnWorldDone()
     FrameInputs in = {};
     bool valid = engine::BuildFrameInputs(in);
     engine::ClearOpaqueState();
+    if (g_stockFogPushed)
+    {
+        // BuildFrameInputs read the pushed values; the fog model wants the client's own.
+        in.fogStart = g_savedStockFog.start[engine::kFrameFogGroup];
+        in.fogEnd = g_savedStockFog.end[engine::kFrameFogGroup];
+    }
     const Config& cfg = GlobalConfig().Get();
     const char* skip = "invalid frame inputs";
     bool rendered = false;

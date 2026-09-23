@@ -8,7 +8,7 @@
 #define SHADOW_STEPS 6
 #define LAYER_REGS 6
 
-float4 cToLight  : register(c9);   // xyz toward-light direction (view space), w = light visibility
+float4 cToLight  : register(c9);   // xyz toward-light direction (view space), w = light above the horizon
 float4 cShadow   : register(c10);  // x = min step (yd), y = step per yard of distance, z = enabled, w = thickness in steps
 float4 cMarch    : register(c11);  // x = jitter, y = distance-curve range, z = horizon blend start, w = far clip
 float4 cLayer[24] : register(c12); // four layers of six float4, see FogLayer in fog_model.h
@@ -36,8 +36,10 @@ float SunVisibility(float3 p, float t, float jitter)
         float2 px = ViewToPixel(q);
         [branch] if (any(px < cRect.xy) || any(px > cRect.xy + cRect.zw))
             break;
-        float sz = LinearDepth(SampleDepth(sDepth, px));
-        [branch] if (sz < q.z - 0.3 && sz > q.z - thickness)
+        // Distant terrain and sky decode to the fog range and never occlude.
+        float ds = SampleDepth(sDepth, px);
+        float sz = LinearDepth(ds);
+        [branch] if (!BeyondWorld(ds) && sz < q.z - 0.3 && sz > q.z - thickness)
         {
             vis = 0;
             break;
@@ -59,7 +61,7 @@ void AccumulateLayer(int b, float phase, float scale, float ta, float t, float d
     float4 l4 = cLayer[b + 4];
     float4 l5 = cLayer[b + 5];
     float cover = saturate((t - l0.x) / max(dt, 1e-3)) * saturate((l5.z - ta) / max(dt, 1e-3));
-    float curve = 1 + l1.w * pow(saturate(t / cMarch.y) + 1e-6, l2.w);
+    float curve = 1 + l1.w * pow(saturate(max(t - l0.x, 0) / cMarch.y) + 1e-6, l2.w);
     float heightF = saturate(exp((l3.x - h) * l3.y)) * saturate(exp((h - l3.z) * l3.w));
     float shadowed = l5.x;
     float lit = lerp(1, vis, shadowed);
@@ -76,9 +78,9 @@ float4 main(float2 vpos : VPOS) : COLOR0
     float rayLen = length(ray);
     float3 V = ray / rayLen;
     float d = SampleDepth(sDepth, pc);
-    float sky = d >= cDepthLin.w ? 1 : 0;
+    float sky = IsSky(d) ? 1 : 0;
     float z = LinearDepth(d);
-    float horizon = max(sky, smoothstep(cMarch.z, cMarch.w, z));
+    float horizon = max(BeyondWorld(d) ? 1 : 0, smoothstep(cMarch.z, cMarch.w, z));
     z = lerp(z, cDepthLin.z, horizon);
     float tMax = min(z * rayLen, cDepthLin.z);
 
@@ -87,8 +89,8 @@ float4 main(float2 vpos : VPOS) : COLOR0
     float3 dirW = mul(V, (float3x3)cInvView);
     float cosT = dot(cToLight.xyz, V);
     float up = max(dirW.z, 0);
-    // Pixels without depth below the horizon (beyond the far clip, or water that wrote none) and geometry
-    // fading into the horizon are marched as level rays, so they meet the sky at eye level seamlessly.
+    // Pixels beyond the far clip (distant terrain, or sky below the horizon) and geometry fading into the
+    // horizon are marched as level rays, so they meet the sky at eye level seamlessly.
     float dirZ = lerp(dirW.z, up, horizon);
 
     float phase[4];
@@ -113,9 +115,11 @@ float4 main(float2 vpos : VPOS) : COLOR0
         float dt = tb - ta;
         float t = lerp(ta, tb, jitter);
         float h = camW.z + dirZ * t;
-        float vis = 1;
+        // Shadowed layers only: the light below the horizon counts as shadow, as in the modern shadowed
+        // injection (sunVis = shadow * sunAboveHorizon).
+        float vis = cToLight.w;
         [branch] if (cShadow.z > 0)
-            vis = SunVisibility(V * t, t, jitter);
+            vis *= SunVisibility(V * t, t, jitter);
         float3 src = 0;
         float tau = 0;
         [unroll] for (int j = 0; j < 4; j++)

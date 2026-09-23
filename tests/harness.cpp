@@ -67,12 +67,16 @@ void LookAt(Vec3 eye, Vec3 at, float* m)
 }
 
 // The client's projection builder (0x6BF370): OpenGL depth range, w = view z.
+void EngineProjectionFrom(float ys, float aspect, float zn, float zf, float* m)
+{
+    float p[16] = {ys / aspect, 0, 0, 0, 0, ys, 0, 0, 0, 0, (zf + zn) / (zf - zn), 1,
+                   0, 0, -2.0f * zf * zn / (zf - zn), 0};
+    std::memcpy(m, p, sizeof(p));
+}
+
 void EngineProjection(float aspect, float* m)
 {
-    float ys = 1.0f / std::tan(kFovY * 0.5f);
-    float p[16] = {ys / aspect, 0, 0, 0, 0, ys, 0, 0, 0, 0, (kFar + kNear) / (kFar - kNear), 1,
-                   0, 0, -2.0f * kFar * kNear / (kFar - kNear), 0};
-    std::memcpy(m, p, sizeof(p));
+    EngineProjectionFrom(1.0f / std::tan(kFovY * 0.5f), aspect, kNear, kFar, m);
 }
 
 // The D3D backend's upload of the same projection: depth remapped to [0, 1].
@@ -89,11 +93,11 @@ struct SceneVertex
     DWORD color;
 };
 
-void AddQuad(std::vector<SceneVertex>& v, Vec3 a, Vec3 b, Vec3 c, Vec3 d, DWORD color)
+void AddQuad(std::vector<SceneVertex>& v, Vec3 a, Vec3 b, Vec3 c, Vec3 d, DWORD color, Vec3 offset = kWorldOffset)
 {
     for (Vec3 p : {a, b, c, a, c, d})
     {
-        Vec3 w = Add(p, kWorldOffset);
+        Vec3 w = Add(p, offset);
         v.push_back({w.x, w.y, w.z, color});
     }
 }
@@ -192,17 +196,21 @@ Image Capture(IDirect3DDevice9* dev)
     return img;
 }
 
+// Covers every texture stage and pixel constant the fog passes touch (renderer.cpp kStages, kPixelConstants).
+constexpr DWORD kSentinelStages = 4;
+constexpr UINT kSentinelConstants = 36;
+
 struct Sentinel
 {
     DWORD renderStates[10];
-    DWORD samplers[3][4];
-    IDirect3DBaseTexture9* textures[3];
+    DWORD samplers[kSentinelStages][4];
+    IDirect3DBaseTexture9* textures[kSentinelStages];
     IDirect3DVertexShader9* vs;
     IDirect3DPixelShader9* ps;
     IDirect3DVertexDeclaration9* decl;
     IDirect3DVertexBuffer9* stream;
     UINT streamOffset, streamStride;
-    float constants[24 * 4];
+    float constants[kSentinelConstants * 4];
     D3DVIEWPORT9 viewport;
     RECT scissor;
     IDirect3DSurface9* rt;
@@ -221,7 +229,7 @@ void ReadSentinel(IDirect3DDevice9* dev, Sentinel& s)
     std::memset(&s, 0, sizeof(s));
     for (int i = 0; i < 10; ++i)
         dev->GetRenderState(kSentinelStates[i], &s.renderStates[i]);
-    for (DWORD t = 0; t < 3; ++t)
+    for (DWORD t = 0; t < kSentinelStages; ++t)
     {
         for (int i = 0; i < 4; ++i)
             dev->GetSamplerState(t, kSentinelSamplers[i], &s.samplers[t][i]);
@@ -231,7 +239,7 @@ void ReadSentinel(IDirect3DDevice9* dev, Sentinel& s)
     dev->GetPixelShader(&s.ps);
     dev->GetVertexDeclaration(&s.decl);
     dev->GetStreamSource(0, &s.stream, &s.streamOffset, &s.streamStride);
-    dev->GetPixelShaderConstantF(0, s.constants, 24);
+    dev->GetPixelShaderConstantF(0, s.constants, kSentinelConstants);
     dev->GetViewport(&s.viewport);
     dev->GetScissorRect(&s.scissor);
     dev->GetRenderTarget(0, &s.rt);
@@ -240,7 +248,7 @@ void ReadSentinel(IDirect3DDevice9* dev, Sentinel& s)
 
 void ReleaseSentinel(Sentinel& s)
 {
-    IUnknown* refs[] = {s.textures[0], s.textures[1], s.textures[2], s.vs, s.ps, s.decl, s.stream, s.rt, s.ds};
+    IUnknown* refs[] = {s.textures[0], s.textures[1], s.textures[2], s.textures[3], s.vs, s.ps, s.decl, s.stream, s.rt, s.ds};
     for (IUnknown* r : refs)
         if (r)
             r->Release();
@@ -251,7 +259,7 @@ void ReportSentinelDifferences(const Sentinel& a, const Sentinel& b)
     for (int i = 0; i < 10; ++i)
         if (a.renderStates[i] != b.renderStates[i])
             std::printf("     render state %d: %lu -> %lu\n", kSentinelStates[i], a.renderStates[i], b.renderStates[i]);
-    for (int t = 0; t < 3; ++t)
+    for (DWORD t = 0; t < kSentinelStages; ++t)
     {
         for (int i = 0; i < 4; ++i)
             if (a.samplers[t][i] != b.samplers[t][i])
@@ -268,7 +276,7 @@ void ReportSentinelDifferences(const Sentinel& a, const Sentinel& b)
     if (a.stream != b.stream || a.streamOffset != b.streamOffset || a.streamStride != b.streamStride)
         std::printf("     stream 0: %p+%u/%u -> %p+%u/%u\n", static_cast<void*>(a.stream), a.streamOffset,
                     a.streamStride, static_cast<void*>(b.stream), b.streamOffset, b.streamStride);
-    for (int i = 0; i < 24 * 4; ++i)
+    for (UINT i = 0; i < kSentinelConstants * 4; ++i)
         if (a.constants[i] != b.constants[i])
         {
             std::printf("     pixel constant c%d differs\n", i / 4);
@@ -307,6 +315,7 @@ struct Harness
     IDirect3DVertexShader9* engineVs = nullptr;
     IDirect3DPixelShader9* enginePs = nullptr;
     IDirect3DVertexDeclaration9* engineDecl = nullptr;
+    D3DCOLOR clearColor = 0xFF6FA0DC;
 
     void CreateEngineObjects()
     {
@@ -340,9 +349,9 @@ struct Harness
         dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
         dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF);
         dev->SetRenderState(D3DRS_STENCILENABLE, FALSE);
-        for (DWORD t = 0; t < 3; ++t)
+        for (DWORD t = 0; t < kSentinelStages; ++t)
             dev->SetTexture(t, nullptr);
-        dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0xFF6FA0DC, 1.0f, 0);
+        dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, clearColor, 1.0f, 0);
     }
 
     void DrawScene(Vec3 eye, const float* view, const float* engineProj, const D3DVIEWPORT9& vp)
@@ -373,6 +382,29 @@ struct Harness
                              sizeof(SceneVertex));
     }
 
+    // A pretransformed quad written at a raw depth value, over the full [0, 1] depth range.
+    void DrawScreenQuad(float x0, float y0, float x1, float y1, float depth)
+    {
+        struct ScreenVertex
+        {
+            float x, y, z, rhw;
+            DWORD color;
+        };
+        const ScreenVertex quad[6] = {
+            {x0, y0, depth, 1, 0xFF808890}, {x1, y0, depth, 1, 0xFF808890}, {x0, y1, depth, 1, 0xFF808890},
+            {x1, y0, depth, 1, 0xFF808890}, {x1, y1, depth, 1, 0xFF808890}, {x0, y1, depth, 1, 0xFF808890},
+        };
+        D3DVIEWPORT9 vp = {};
+        dev->GetViewport(&vp);
+        D3DVIEWPORT9 full = vp;
+        full.MinZ = 0.0f;
+        full.MaxZ = 1.0f;
+        dev->SetViewport(&full);
+        dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+        dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 2, quad, sizeof(ScreenVertex));
+        dev->SetViewport(&vp);
+    }
+
     void SetEngineState(const D3DVIEWPORT9& vp)
     {
         dev->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE);
@@ -385,7 +417,7 @@ struct Harness
         dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0x7);
         dev->SetRenderState(D3DRS_FOGENABLE, TRUE);
         dev->SetRenderState(D3DRS_STENCILENABLE, TRUE);
-        for (DWORD t = 0; t < 3; ++t)
+        for (DWORD t = 0; t < kSentinelStages; ++t)
         {
             dev->SetTexture(t, dummyTexture);
             dev->SetSamplerState(t, D3DSAMP_ADDRESSU, D3DTADDRESS_MIRROR);
@@ -393,10 +425,10 @@ struct Harness
             dev->SetSamplerState(t, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
             dev->SetSamplerState(t, D3DSAMP_MIPFILTER, D3DTEXF_LINEAR);
         }
-        float constants[24 * 4];
-        for (int i = 0; i < 24 * 4; ++i)
+        float constants[kSentinelConstants * 4];
+        for (UINT i = 0; i < kSentinelConstants * 4; ++i)
             constants[i] = 0.25f * i - 3.0f;
-        dev->SetPixelShaderConstantF(0, constants, 24);
+        dev->SetPixelShaderConstantF(0, constants, kSentinelConstants);
         dev->SetVertexDeclaration(engineDecl);
         dev->SetStreamSource(0, dummyBuffer, 16, 16);
         dev->SetViewport(&vp);
@@ -476,7 +508,9 @@ float ReferenceSkyTransmittance(const FrameInputs& in, const Config& cfg, const 
         {
             float scale = std::exp(-std::fmax(dirW.z, 0.0f) * l.skyFalloff);
             float cover = clamp01((t - l.start) / std::fmax(dt, 1e-3f)) * clamp01((l.limit - ta) / std::fmax(dt, 1e-3f));
-            float curve = 1.0f + l.strength * std::pow(std::fmin(t / fog.maxDistance, 1.0f) + 1e-6f, l.exponent);
+            float curve = 1.0f + l.strength * std::pow(std::fmin(std::fmax(t - l.start, 0.0f) / fog.maxDistance, 1.0f) +
+                                                           1e-6f,
+                                                       l.exponent);
             float heightF = std::fmin(std::exp((l.upperHeight - h) * l.upperFalloff), 1.0f) *
                             std::fmin(std::exp((h - l.lowerHeight) * l.lowerFalloff), 1.0f);
             tau += l.density * scale * dt * cover * curve * heightF;
@@ -693,7 +727,93 @@ int Run(const std::wstring& outDir, const std::string& dataPath)
     SavePng(outDir + L"\\before.png", before.w, before.h, before.bgra);
     SavePng(outDir + L"\\after.png", after.w, after.h, after.bgra);
 
-    auto renderDebug = [&](int mode, float maxDist) {
+    {
+        // The linear composite: zero fog leaves the world viewport unchanged, and fogged pixels equal
+        // encode(RollOff(scene * T + L)) rebuilt from the radiance and transmittance debug views. The temporal
+        // filter converges each run so the march jitter averages out.
+        LookAt(eye, at, view);
+        auto converge = [&](const Config& c) {
+            vf_test_set_config(&c);
+            Image img;
+            for (int frame = 0; frame < 16; ++frame)
+            {
+                h.BeginFrame();
+                h.DrawScene(eye, view, proj, world);
+                FrameInputs in = MakeInputs(view, proj, eye, at, world);
+                vf_test_render(&in, &skip);
+                if (frame == 15)
+                    img = Capture(h.dev);
+                h.dev->EndScene();
+            }
+            return img;
+        };
+        h.BeginFrame();
+        h.DrawScene(eye, view, proj, world);
+        Image scene = Capture(h.dev);
+        h.dev->EndScene();
+
+        Config c = cfg;
+        c.godRays = 0.0f;
+        c.temporal = 0.85f;
+        Config none = c;
+        none.density = 0.0f;
+        Image unfogged = converge(none);
+        int maxDiff = 0;
+        for (UINT y = 0; y < 688; ++y)
+            for (UINT x = 0; x < 1280; ++x)
+                for (int ch = 0; ch < 3; ++ch)
+                    maxDiff = std::max(maxDiff, std::abs(unfogged.At(x, y)[ch] - scene.At(x, y)[ch]));
+        std::printf("     zero fog: largest channel change %d/255\n", maxDiff);
+        Check(maxDiff <= 1, "zero fog leaves the world viewport unchanged (linear composite)");
+
+        Config radianceCfg = c;
+        radianceCfg.debugView = 1;
+        Image radiance = converge(radianceCfg);
+        Config transmittanceCfg = c;
+        transmittanceCfg.debugView = 2;
+        Image transmittance = converge(transmittanceCfg);
+        Image composited = converge(c);
+        auto boxMean = [](const Image& img, UINT cx, UINT cy, int ch) {
+            double sum = 0.0;
+            for (UINT y = cy - 3; y <= cy + 3; ++y)
+                for (UINT x = cx - 3; x <= cx + 3; ++x)
+                    sum += img.At(x, y)[ch];
+            return static_cast<float>(sum / 49.0 / 255.0);
+        };
+        auto rollOff = [](float x, float knee) {
+            float span = std::fmax(1.0f - knee, 1e-4f);
+            return x <= knee ? x : knee + span * (1.0f - std::exp(-(x - knee) / span));
+        };
+        const UINT points[3][2] = {{101, 101}, {640, 330}, {640, 600}};
+        float worst = 0.0f;
+        for (const auto& p : points)
+            for (int ch = 0; ch < 3; ++ch)
+            {
+                float s = std::pow(boxMean(scene, p[0], p[1], ch), 2.2f);
+                float l = std::pow(boxMean(radiance, p[0], p[1], ch), 2.2f);
+                float t = boxMean(transmittance, p[0], p[1], 2);
+                float expected = std::pow(rollOff(s * t + l, std::fmax(0.8f, s)), 1.0f / 2.2f);
+                worst = std::fmax(worst, std::fabs(boxMean(composited, p[0], p[1], ch) - expected));
+            }
+        std::printf("     linear composite vs scene * T + L: largest difference %.1f/255\n", worst * 255.0f);
+        Check(worst < 4.0f / 255.0f, "fog blends over the scene in linear light");
+
+        Config gamma = c;
+        gamma.colorSpace = 0;
+        Image gammaImage = converge(gamma);
+        double gammaDiff = 0.0;
+        for (UINT y = 0; y < 688; ++y)
+            for (UINT x = 0; x < 1280; ++x)
+                gammaDiff += std::fabs(gammaImage.Luma(x, y) - scene.Luma(x, y));
+        gammaDiff /= 1280.0 * 688.0;
+        std::printf("     gamma mode: mean luma change %.4f\n", gammaDiff);
+        Check(gammaDiff > 0.01 && gammaDiff < 0.5, "gamma mode (ColorSpace 0) still blends the fog");
+        vf_test_set_config(&cfg);
+    }
+
+    // wdlDepth > 0 also draws a patch in the top-left corner at that raw depth, as the client draws its distant
+    // WDL terrain into [0.998, 0.999] behind the world.
+    auto renderDebugIn = [&](int mode, float maxDist, const D3DVIEWPORT9& vp, float wdlDepth) {
         Config c = cfg;
         c.debugView = mode;
         c.maxDistance = maxDist;
@@ -701,8 +821,10 @@ int Run(const std::wstring& outDir, const std::string& dataPath)
         vf_test_set_config(&c);
         LookAt(eye, at, view);
         h.BeginFrame();
-        h.DrawScene(eye, view, proj, world);
-        FrameInputs in = MakeInputs(view, proj, eye, at, world);
+        h.DrawScene(eye, view, proj, vp);
+        if (wdlDepth > 0.0f)
+            h.DrawScreenQuad(0.0f, 0.0f, 200.0f, 100.0f, wdlDepth);
+        FrameInputs in = MakeInputs(view, proj, eye, at, vp);
         in.farClip = std::fmin(in.farClip, maxDist);
         vf_test_render(&in, &skip);
         Image img = Capture(h.dev);
@@ -710,6 +832,7 @@ int Run(const std::wstring& outDir, const std::string& dataPath)
         h.dev->Present(nullptr, nullptr, nullptr, nullptr);
         return img;
     };
+    auto renderDebug = [&](int mode, float maxDist) { return renderDebugIn(mode, maxDist, world, 0.0f); };
 
     Image radiance = renderDebug(1, 5000.0f);
     SavePng(outDir + L"\\debug-radiance.png", radiance.w, radiance.h, radiance.bgra);
@@ -903,6 +1026,47 @@ int Run(const std::wstring& outDir, const std::string& dataPath)
         float got = depthView.At(px, py)[2] / 255.0f;
         std::printf("     ground view depth: expected %.2f yd, shader %.2f yd\n", viewZ, got * 255.0f);
         Check(std::fabs(got - expected) < 2.5f / 255.0f, "depth linearisation matches the scene geometry");
+
+        // The client draws the world with viewport depth [0, 0.94] (0x004F9019) and its distant WDL terrain
+        // behind it at [0.998, 0.999]. Depth must be read through the captured viewport's range.
+        D3DVIEWPORT9 clientVp = world;
+        clientVp.MaxZ = 0.94f;
+        Image clientDepth = renderDebugIn(3, 255.0f, clientVp, 0.9985f);
+        float clientGot = clientDepth.At(px, py)[2] / 255.0f;
+        float wdl = clientDepth.At(100, 50)[2] / 255.0f;
+        std::printf("     client depth range: ground %.2f yd (expected %.2f), distant terrain %.2f of max distance\n",
+                    clientGot * 255.0f, viewZ, wdl);
+        Check(std::fabs(clientGot - expected) < 2.5f / 255.0f,
+              "depth linearisation follows the world viewport's MaxZ 0.94");
+        Check(wdl > 0.99f, "depth beyond the world range (distant terrain) counts as beyond the far clip");
+        // Distant terrain is marched to the fog range with full density; the sky beside it thins with elevation.
+        Image clientSkyT = renderDebugIn(2, 5000.0f, clientVp, 0.9985f);
+        float wdlT = clientSkyT.At(100, 50)[2] / 255.0f;
+        float skyT = clientSkyT.At(300, 50)[2] / 255.0f;
+        std::printf("     transmittance: distant terrain %.3f, sky beside it %.3f\n", wdlT, skyT);
+        Check(wdlT < skyT - 0.1f, "distant terrain is fogged as terrain, not as sky");
+
+        UINT midRow = 0;
+        float midZ = 0.0f;
+        for (UINT row = 687; row > 0 && !midRow; --row)
+        {
+            float rowNdc = 1.0f - (row + 0.5f) / 688.0f * 2.0f;
+            float dz = rowNdc / proj[5] * view[9] + view[10];
+            float z = dz < 0.0f ? -(eye.z - kWorldOffset.z) / dz : 1e9f;
+            if (z > 150.0f)
+            {
+                midRow = row;
+                midZ = z;
+            }
+        }
+        Image idealT = renderDebugIn(2, 5000.0f, world, 0.0f);
+        Image clientT = renderDebugIn(2, 5000.0f, clientVp, 0.0f);
+        float ti = idealT.At(640, midRow)[2] / 255.0f;
+        float tc = clientT.At(640, midRow)[2] / 255.0f;
+        std::printf("     ground at %.0f yd: transmittance %.3f with the full depth range, %.3f with the client's\n",
+                    midZ, ti, tc);
+        Check(ti < 0.97f && std::fabs(ti - tc) < 2.5f / 255.0f,
+              "fog on geometry is the same with the client's depth range");
     }
 
     {
@@ -959,12 +1123,488 @@ int Run(const std::wstring& outDir, const std::string& dataPath)
     std::printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "OK", g_failures, g_failures == 1 ? "" : "s");
     return g_failures ? 1 : 0;
 }
+
+// --scene harbour: the logged in-game frame at the Stormwind harbour (map 0, day 0.7802, CoAVolFog.log) rendered
+// through the real wrapper and shaders over an ideal depth buffer. It checks nothing: it writes PNGs and prints
+// probe tables, so the fog model can be judged apart from the in-game pipeline.
+constexpr Vec3 kHarbourEye = {-8576.0f, 1007.0f, 104.0f};
+constexpr float kHarbourNear = 0.2f;
+constexpr float kHarbourFar = 791.6f;
+// P11 of the logged frame, recovered from its sunPx (y -5485 of 1440) and view-space sun (0.950 0.308 0.054).
+constexpr float kHarbourProjY = 1.511f;
+constexpr UINT kHarbourWidth = 2560;
+constexpr UINT kHarbourHeight = 1440;
+constexpr int kHarbourSettleFrames = 24;
+constexpr D3DCOLOR kHarbourSky = 0xFFFFD890;
+constexpr D3DCOLOR kHarbourSea = 0xFF1A2430;
+constexpr float kDegree = kPi / 180.0f;
+
+Vec3 Dir(float azimuthDeg, float elevationDeg)
+{
+    float a = azimuthDeg * kDegree;
+    float e = elevationDeg * kDegree;
+    return {std::cos(e) * std::cos(a), std::cos(e) * std::sin(a), std::sin(e)};
+}
+
+D3DCOLOR Shade(D3DCOLOR c, float s)
+{
+    auto ch = [&](int shift) {
+        return static_cast<D3DCOLOR>(std::fmin(((c >> shift) & 0xFF) * s, 255.0f)) << shift;
+    };
+    return 0xFF000000u | ch(16) | ch(8) | ch(0);
+}
+
+// Objects stand on the sea (z = 0); side is degrees left of the view azimuth, distance is to the near face.
+struct HarbourObject
+{
+    float side, distance, depth, halfWidth, top;
+    D3DCOLOR color;
+};
+
+const HarbourObject kHarbourObjects[] = {
+    {18.0f, 80.0f, 30.0f, 12.0f, 75.0f, 0xFF808080},   // ship
+    {-6.0f, 350.0f, 20.0f, 10.0f, 140.0f, 0xFFA8A8B0}, // lighthouse
+    {-25.0f, 650.0f, 80.0f, 150.0f, 190.0f, 0xFF4A5A38}, // ridge
+};
+
+void AddStandingBox(std::vector<SceneVertex>& v, float azimuthDeg, const HarbourObject& o)
+{
+    Vec3 f = Dir(azimuthDeg, 0.0f);
+    Vec3 r = {f.y, -f.x, 0.0f};
+    Vec3 c = {kHarbourEye.x + f.x * o.distance, kHarbourEye.y + f.y * o.distance, 0.0f};
+    auto corner = [&](float along, float side, float z) {
+        return Vec3{c.x + f.x * along + r.x * side, c.y + f.y * along + r.y * side, z};
+    };
+    const float w = o.halfWidth;
+    Vec3 p[8] = {corner(0, -w, 0),       corner(0, w, 0),       corner(o.depth, w, 0),       corner(o.depth, -w, 0),
+                 corner(0, -w, o.top), corner(0, w, o.top), corner(o.depth, w, o.top), corner(o.depth, -w, o.top)};
+    const Vec3 absolute = {0, 0, 0};
+    AddQuad(v, p[0], p[1], p[5], p[4], o.color, absolute);
+    AddQuad(v, p[1], p[2], p[6], p[5], Shade(o.color, 0.75f), absolute);
+    AddQuad(v, p[2], p[3], p[7], p[6], Shade(o.color, 0.6f), absolute);
+    AddQuad(v, p[3], p[0], p[4], p[7], Shade(o.color, 0.75f), absolute);
+    AddQuad(v, p[4], p[5], p[6], p[7], Shade(o.color, 1.15f), absolute);
+}
+
+// The same set of objects in front of each of the two horizontal views.
+std::vector<SceneVertex> BuildHarbourScene(const float* baseAzimuths, int count)
+{
+    std::vector<SceneVertex> v;
+    const float e = 3000.0f;
+    const Vec3 absolute = {0, 0, 0};
+    const Vec3 o = {kHarbourEye.x, kHarbourEye.y, 0.0f};
+    AddQuad(v, Add(o, {-e, -e, 0}), Add(o, {e, -e, 0}), Add(o, {e, e, 0}), Add(o, {-e, e, 0}), kHarbourSea, absolute);
+    for (int i = 0; i < count; ++i)
+        for (const HarbourObject& obj : kHarbourObjects)
+            AddStandingBox(v, baseAzimuths[i] + obj.side, obj);
+    return v;
+}
+
+enum class ProbeKind
+{
+    World, // a = horizontal distance, b = height
+    Sky,   // a = elevation (deg)
+    Sun,   // a = elevation offset from the sun (deg), at the sun's azimuth
+};
+
+struct HarbourProbe
+{
+    const char* name;
+    ProbeKind kind;
+    float side;
+    float a;
+    float b;
+};
+
+const HarbourProbe kHarbourProbes[] = {
+    {"ship (80 yd, z 55)", ProbeKind::World, 18.0f, 80.0f, 55.0f},
+    {"ship hull (80 yd, z 10)", ProbeKind::World, 18.0f, 80.0f, 10.0f},
+    {"lighthouse (350 yd, z 60)", ProbeKind::World, -6.0f, 350.0f, 60.0f},
+    {"lighthouse top (350 yd, z 125)", ProbeKind::World, -6.0f, 350.0f, 125.0f},
+    {"ridge (650 yd, z 60)", ProbeKind::World, -25.0f, 650.0f, 60.0f},
+    {"ridge top (650 yd, z 170)", ProbeKind::World, -25.0f, 650.0f, 170.0f},
+    {"sea 100 yd", ProbeKind::World, 3.0f, 100.0f, 0.0f},
+    {"sea 160 yd", ProbeKind::World, 3.0f, 160.0f, 0.0f},
+    {"sea 400 yd", ProbeKind::World, 3.0f, 400.0f, 0.0f},
+    {"sea 700 yd", ProbeKind::World, 3.0f, 700.0f, 0.0f},
+    {"sky past the far clip (-4 deg)", ProbeKind::Sky, 3.0f, -4.0f, 0.0f},
+    {"sky at the horizon (+1 deg)", ProbeKind::Sky, 30.0f, 1.0f, 0.0f},
+    {"sky 10 deg", ProbeKind::Sky, 30.0f, 10.0f, 0.0f},
+    {"sky 40 deg", ProbeKind::Sky, 30.0f, 40.0f, 0.0f},
+    {"near the sun (6 deg below)", ProbeKind::Sun, 0.0f, -6.0f, 0.0f},
+    {"near the sun (15 deg below)", ProbeKind::Sun, 0.0f, -15.0f, 0.0f},
+};
+
+struct HarbourView
+{
+    const wchar_t* file;
+    const char* name;
+    float baseAzimuth;
+    float pitch;
+    // The world pass's viewport MaxZ: 1 is the ideal depth buffer; the client passes [0x00ADEEE4] = 0.94 to
+    // GxXformSetViewport at 0x004F905A, which its D3D9 backend (0x006A9ACC) uploads as D3DVIEWPORT9::MaxZ.
+    float maxZ;
+};
+
+constexpr float kClientWorldMaxZ = 0.94f;
+
+struct Rgb
+{
+    float r, g, b;
+};
+
+Rgb SampleRgb(const Image& img, int cx, int cy, int radius)
+{
+    Rgb sum = {};
+    int n = 0;
+    for (int y = cy - radius; y <= cy + radius; ++y)
+        for (int x = cx - radius; x <= cx + radius; ++x)
+        {
+            const unsigned char* p = img.At(static_cast<UINT>(x), static_cast<UINT>(y));
+            sum.r += p[2];
+            sum.g += p[1];
+            sum.b += p[0];
+            ++n;
+        }
+    return {sum.r / n, sum.g / n, sum.b / n};
+}
+
+// Continuous optical depth per layer along one pixel ray, as vf_march.hlsl integrates it with the sun visible
+// (no screen-space shadows) and without its 24-step quadrature.
+void ReferenceOpticalDepth(const FogParams& fog, float camZ, Vec3 dirW, float viewZ, float rayLen, bool sky,
+                           float* tau)
+{
+    float z = sky ? fog.maxDistance : viewZ;
+    float horizon = sky ? 1.0f : SmoothStep(fog.horizonStart, fog.farClip, z);
+    z = z + (fog.maxDistance - z) * horizon;
+    float tMax = std::fmin(z * rayLen, fog.maxDistance);
+    float up = std::fmax(dirW.z, 0.0f);
+    float dirZ = dirW.z + (up - dirW.z) * horizon;
+    const int n = 8192;
+    const float dt = tMax / n;
+    for (int j = 0; j < kFogLayers; ++j)
+        tau[j] = 0.0f;
+    for (int i = 0; i < n; ++i)
+    {
+        float t = (i + 0.5f) * dt;
+        float h = camZ + dirZ * t;
+        for (int j = 0; j < kFogLayers; ++j)
+        {
+            const FogLayer& l = fog.layers[j];
+            if (t < l.start || t > l.limit)
+                continue;
+            float scale = sky ? std::exp(-up * l.skyFalloff) : 1.0f;
+            float curve = 1.0f + l.strength * std::pow(std::fmin(std::fmax(t - l.start, 0.0f) / fog.maxDistance, 1.0f) +
+                                                           1e-6f,
+                                                       l.exponent);
+            float heightF = std::fmin(std::exp((l.upperHeight - h) * l.upperFalloff), 1.0f) *
+                            std::fmin(std::exp((h - l.lowerHeight) * l.lowerFalloff), 1.0f);
+            tau[j] += l.density * scale * curve * heightF * dt;
+        }
+    }
+}
+
+void PrintLayers(const FogParams& fog)
+{
+    for (int i = 0; i < kFogLayers; ++i)
+    {
+        const FogLayer& l = fog.layers[i];
+        std::printf("  layer %d (%s): start %.0f density %.6f g %.2f diffuse %.2f %.2f %.2f emissive %.2f %.2f %.2f "
+                    "upper %.1f/%.4f lower %.1f/%.4f shadowed %.0f limit %.0f\n",
+                    i, fog.authored && i < 3 ? "classic" : "derived", l.start, l.density, l.g, l.diffuse[0],
+                    l.diffuse[1], l.diffuse[2], l.emissive[0], l.emissive[1], l.emissive[2], l.upperHeight,
+                    l.upperFalloff, l.lowerHeight, l.lowerFalloff, l.shadowed, std::fmin(l.limit, 99999.0f));
+        std::printf("           curve strength %.2f exponent %.2f, sky falloff %.2f, shadow density %.2f, "
+                    "shadow emissive %.2f %.2f %.2f, isotropic %.2f\n",
+                    l.strength, l.exponent, l.skyFalloff, l.shadowDensity, l.shadowEmissive[0], l.shadowEmissive[1],
+                    l.shadowEmissive[2], l.isotropic);
+    }
+}
+
+int RunHarbour(const std::wstring& outDir, const std::string& dataPath)
+{
+    FogData classic;
+    if (!classic.Load(dataPath))
+    {
+        std::printf("Classic fog data %s did not load\n", dataPath.c_str());
+        return 1;
+    }
+    CreateDirectoryW(outDir.c_str(), nullptr);
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    const Vec3 toLight = Norm({0.673f, 0.673f, 0.307f});
+    const float sunAz = std::atan2(toLight.y, toLight.x) / kDegree;
+    const float sunEl = std::asin(toLight.z) / kDegree;
+    const float pitch = sunEl - 20.0f;
+    const HarbourView views[] = {
+        {L"sun", "facing the sun, sun 20 deg above the view centre", sunAz, pitch, 1.0f},
+        {L"right", "90 deg right of the sun, same pitch", sunAz - 90.0f, pitch, 1.0f},
+        {L"sun-up", "facing the sun, pitched up 25 deg (high sky)", sunAz, 25.0f, 1.0f},
+        {L"right-up", "90 deg right of the sun, pitched up 25 deg (high sky)", sunAz - 90.0f, 25.0f, 1.0f},
+        {L"sun-down", "facing the sun, pitched down 40 deg (ship hull, near sea)", sunAz, -40.0f, 1.0f},
+        {L"sun-client-depth-range", "facing the sun, world drawn with the client's viewport MaxZ 0.94", sunAz, pitch,
+         kClientWorldMaxZ},
+        {L"right-client-depth-range", "90 deg right, world drawn with the client's viewport MaxZ 0.94",
+         sunAz - 90.0f, pitch, kClientWorldMaxZ},
+    };
+    const float baseAzimuths[2] = {sunAz, sunAz - 90.0f};
+
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"vfog_harbour";
+    RegisterClassW(&wc);
+    Harness h;
+    h.window = CreateWindowW(L"vfog_harbour", L"vfog harbour", WS_OVERLAPPEDWINDOW, 0, 0, 1280, 720, nullptr, nullptr,
+                             wc.hInstance, nullptr);
+    HMODULE d3d9 = LoadLibraryA("d3d9.dll");
+    auto realCreate = reinterpret_cast<IDirect3D9*(WINAPI*)(UINT)>(GetProcAddress(d3d9, "Direct3DCreate9"));
+    h.d3d = vf_test_wrap_direct3d9(realCreate, D3D_SDK_VERSION);
+    if (!h.d3d)
+        return 1;
+    h.pp.Windowed = TRUE;
+    h.pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    h.pp.BackBufferWidth = kHarbourWidth;
+    h.pp.BackBufferHeight = kHarbourHeight;
+    h.pp.BackBufferFormat = D3DFMT_X8R8G8B8;
+    h.pp.EnableAutoDepthStencil = TRUE;
+    h.pp.AutoDepthStencilFormat = D3DFMT_D24S8;
+    h.pp.hDeviceWindow = h.window;
+    h.pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
+    DWORD engineFlags = D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE | D3DCREATE_FPU_PRESERVE;
+    if (FAILED(h.d3d->CreateDevice(0, D3DDEVTYPE_HAL, h.window, engineFlags, &h.pp, &h.dev)) || !h.dev)
+    {
+        std::printf("CreateDevice through the wrapper failed\n");
+        h.d3d->Release();
+        return 1;
+    }
+    h.scene = BuildHarbourScene(baseAzimuths, 2);
+    h.clearColor = kHarbourSky;
+
+    const D3DVIEWPORT9 vp = {0, 0, kHarbourWidth, kHarbourHeight, 0.0f, 1.0f};
+    const float aspect = static_cast<float>(kHarbourWidth) / kHarbourHeight;
+    float proj[16];
+    EngineProjectionFrom(kHarbourProjY, aspect, kHarbourNear, kHarbourFar, proj);
+    const Config cfg = {}; // the shipped CoAVolFog.ini values
+
+    auto inputsFor = [&](const float* view, Vec3 at) {
+        FrameInputs in = MakeInputs(view, proj, kHarbourEye, at, vp);
+        // The client's camera target (0x00CD8F68) is one yard along the view (logged frame 0), so refZ = camera - 1.
+        Vec3 f = Norm(Sub(at, kHarbourEye));
+        in.camTarget[0] = kHarbourEye.x + f.x;
+        in.camTarget[1] = kHarbourEye.y + f.y;
+        in.camTarget[2] = kHarbourEye.z + f.z;
+        in.dayFraction = 0.7802f;
+        in.toLight[0] = toLight.x;
+        in.toLight[1] = toLight.y;
+        in.toLight[2] = toLight.z;
+        in.lightIsMoon = false;
+        in.fogColor = 0xFF574C5C;
+        in.sunColor = 0xFFFFE7B6;
+        in.directColor = 0xFFFF7400;
+        in.ambientColor = 0xFF676680;
+        in.fogStart = 197.9f;
+        in.fogEnd = 791.7f;
+        in.zoneFogDistance = 791.7f;
+        in.farClip = kHarbourFar;
+        in.inLiquid = false;
+        in.mapId = 0;
+        return in;
+    };
+
+    {
+        float view[16];
+        Vec3 at = Add(kHarbourEye, Dir(views[0].baseAzimuth, views[0].pitch));
+        LookAt(kHarbourEye, at, view);
+        FrameInputs in = inputsFor(view, at);
+        AuthoredFog authored = {};
+        bool resolved = classic.Resolve(0, in.camPos, in.dayFraction, 0, authored);
+        std::printf("harbour frame: camera (%.1f %.1f %.1f), day %.4f, toLight (%.3f %.3f %.3f) = azimuth %.1f "
+                    "elevation %.2f deg\n",
+                    in.camPos[0], in.camPos[1], in.camPos[2], in.dayFraction, toLight.x, toLight.y, toLight.z, sunAz,
+                    sunEl);
+        std::printf("  projection P00 %.4f P11 %.4f near %.2f far %.1f, %ux%u\n", proj[0], proj[5], kHarbourNear,
+                    kHarbourFar, kHarbourWidth, kHarbourHeight);
+        std::printf("  Classic lights:");
+        for (int i = 0; i < authored.lightCount; ++i)
+            std::printf(" %u:%.2f", authored.lightIds[i], authored.lightWeights[i]);
+        std::printf(" (%s, %d layers)\n", resolved ? "resolved" : "NOT resolved", authored.layerCount);
+        for (int i = 0; i < authored.layerCount; ++i)
+        {
+            const AuthoredLayer& a = authored.layers[i];
+            std::printf("  authored %d: start %.1f density %.4f g %.3f intensity %.2f strength %.3f exponent %.3f "
+                        "diffuse %.3f %.3f %.3f emissive %.3f %.3f %.3f flags %u\n",
+                        i, a.start, a.density, a.g, a.intensity, a.strength, a.exponent, a.diffuse[0], a.diffuse[1],
+                        a.diffuse[2], a.emissive[0], a.emissive[1], a.emissive[2], a.flags);
+        }
+        FogParams fog = BuildFogParams(in, cfg, resolved ? &authored : nullptr);
+        std::printf("  fog params (as the DLL logs them): refZ %.1f maxDistance %.0f horizonStart %.1f farLimit %.1f "
+                    "exposure %.2f\n",
+                    fog.referenceZ, fog.maxDistance, fog.horizonStart, fog.farLimit,
+                    fog.authored ? cfg.classicExposure : cfg.exposure);
+        PrintLayers(fog);
+    }
+
+    const char* skip = "";
+    auto frame = [&](const float* view, const FrameInputs& in, const Config& c, bool capture, Image* before) {
+        vf_test_set_config(&c);
+        h.BeginFrame();
+        h.DrawScene(kHarbourEye, view, proj, in.viewport);
+        if (before)
+            *before = Capture(h.dev);
+        if (!vf_test_render(&in, &skip))
+            std::printf("     fog skipped: %s\n", skip);
+        Image img;
+        if (capture)
+            img = Capture(h.dev);
+        h.dev->EndScene();
+        h.dev->Present(nullptr, nullptr, nullptr, nullptr);
+        return img;
+    };
+
+    for (const HarbourView& hv : views)
+    {
+        float view[16];
+        Vec3 at = Add(kHarbourEye, Dir(hv.baseAzimuth, hv.pitch));
+        LookAt(kHarbourEye, at, view);
+        FrameInputs in = inputsFor(view, at);
+        in.viewport.MaxZ = hv.maxZ; // the DLL captures this viewport after the opaque pass
+        const bool idealDepth = hv.maxZ >= 1.0f;
+
+        // Linear depth at 791.6/255 yd per level: MaxDistance below the far clip makes the far clip the range.
+        Config depthCfg = cfg;
+        depthCfg.debugView = 3;
+        depthCfg.maxDistance = 200.0f;
+        depthCfg.temporal = 0.0f;
+        Image depth = frame(view, in, depthCfg, true, nullptr);
+
+        Config c = cfg;
+        c.temporal = 0.0f;
+        frame(view, in, c, false, nullptr); // restarts the history from this view
+        c.temporal = cfg.temporal;
+        Image before;
+        Image after;
+        for (int i = 1; i < kHarbourSettleFrames; ++i)
+        {
+            bool last = i == kHarbourSettleFrames - 1;
+            Image img = frame(view, in, c, last, last ? &before : nullptr);
+            if (last)
+                after = img;
+        }
+        Image radiance;
+        Image transmittance;
+        c.debugView = 1;
+        for (int i = 0; i < 4; ++i)
+            radiance = frame(view, in, c, i == 3, nullptr);
+        c.debugView = 2;
+        for (int i = 0; i < 4; ++i)
+            transmittance = frame(view, in, c, i == 3, nullptr);
+
+        std::wstring stem = outDir + L"\\harbour-" + hv.file;
+        SavePng(stem + L"-before.png", before.w, before.h, before.bgra);
+        SavePng(stem + L"-after.png", after.w, after.h, after.bgra);
+        SavePng(stem + L"-radiance.png", radiance.w, radiance.h, radiance.bgra);
+        SavePng(stem + L"-transmittance.png", transmittance.w, transmittance.h, transmittance.bgra);
+        SavePng(stem + L"-depth.png", depth.w, depth.h, depth.bgra);
+
+        AuthoredFog authored = {};
+        bool resolved = classic.Resolve(0, in.camPos, in.dayFraction, 0, authored);
+        FogParams fog = BuildFogParams(in, cfg, resolved ? &authored : nullptr);
+        float sunV[3];
+        TransformDirection(in.toLight, view, sunV);
+        std::printf("\nview %ls: %s (azimuth %.1f, pitch %.1f; sun view-space %.3f %.3f %.3f, refZ %.1f, "
+                    "viewport MaxZ %.2f)\n",
+                    hv.file, hv.name, hv.baseAzimuth, hv.pitch, sunV[0], sunV[1], sunV[2], fog.referenceZ,
+                    hv.maxZ);
+        std::printf("  %-31s %6s %6s %6s %13s %6s %15s %15s %15s %15s %6s  %s\n", "probe", "px", "py", "dist",
+                    "viewZ/shader", "alpha", "fog rgb", "fog rgb / a", "before", "after", "cpu a",
+                    "cpu tau L0 L1 L2 L3");
+        for (const HarbourProbe& p : kHarbourProbes)
+        {
+            Vec3 d;
+            if (p.kind == ProbeKind::World)
+            {
+                Vec3 q = Dir(hv.baseAzimuth + p.side, 0.0f);
+                d = {q.x * p.a, q.y * p.a, p.b - kHarbourEye.z};
+            }
+            else if (p.kind == ProbeKind::Sky)
+                d = Dir(hv.baseAzimuth + p.side, p.a);
+            else
+                d = Dir(sunAz, sunEl + p.a);
+            float vx = d.x * view[0] + d.y * view[4] + d.z * view[8];
+            float vy = d.x * view[1] + d.y * view[5] + d.z * view[9];
+            float vz = d.x * view[2] + d.y * view[6] + d.z * view[10];
+            if (vz <= 0.01f)
+                continue;
+            float px = (vx / vz * proj[0] + proj[8]) * 0.5f + 0.5f;
+            float py = 0.5f - (vy / vz * proj[5] + proj[9]) * 0.5f;
+            int ix = static_cast<int>(px * kHarbourWidth);
+            int iy = static_cast<int>(py * kHarbourHeight);
+            if (ix < 4 || iy < 4 || ix >= static_cast<int>(kHarbourWidth) - 4 ||
+                iy >= static_cast<int>(kHarbourHeight) - 4)
+                continue;
+            const bool world = p.kind == ProbeKind::World;
+            float len = std::sqrt(Dot(d, d));
+            float zShader = depth.At(ix, iy)[2] / 255.0f * kHarbourFar;
+            bool shaderSky = depth.At(ix, iy)[2] >= 254;
+            bool matches = world ? std::fabs(zShader - vz) < 6.0f && !shaderSky : shaderSky;
+            // With the client's depth range the linearised depth is wrong by construction, so only sky versus
+            // geometry is checked; the probe layout is the one verified in the ideal-depth views.
+            if (!idealDepth)
+                matches = world ? !shaderSky : shaderSky;
+            if (!matches)
+            {
+                std::printf("  %-31s %6d %6d  hidden (depth %.1f yd%s)\n", p.name, ix, iy, zShader,
+                            shaderSky ? ", sky" : "");
+                continue;
+            }
+            const int radius = 2;
+            Rgb fogRgb = SampleRgb(radiance, ix, iy, radius);
+            Rgb t = SampleRgb(transmittance, ix, iy, radius);
+            Rgb b = SampleRgb(before, ix, iy, radius);
+            Rgb a = SampleRgb(after, ix, iy, radius);
+            float alpha = 1.0f - t.r / 255.0f;
+            float inv = alpha > 0.02f ? 1.0f / alpha : 0.0f;
+            float tau[kFogLayers];
+            Vec3 dirW = {d.x / len, d.y / len, d.z / len};
+            ReferenceOpticalDepth(fog, kHarbourEye.z, dirW, world ? vz : 0.0f, world ? len / vz : 1.0f, !world, tau);
+            float tauSum = tau[0] + tau[1] + tau[2] + tau[3];
+            char distText[16];
+            char zText[24];
+            if (world)
+            {
+                std::snprintf(distText, sizeof(distText), "%.0f", len);
+                std::snprintf(zText, sizeof(zText), "%.0f/%.0f", vz, zShader);
+            }
+            else
+            {
+                std::snprintf(distText, sizeof(distText), "sky");
+                std::snprintf(zText, sizeof(zText), "sky/sky");
+            }
+            std::printf("  %-31s %6d %6d %6s %13s %6.3f %4.0f %4.0f %4.0f  %4.0f %4.0f %4.0f  %4.0f %4.0f %4.0f  "
+                        "%4.0f %4.0f %4.0f %6.3f  %.3f %.3f %.3f %.3f\n",
+                        p.name, ix, iy, distText, zText, alpha, fogRgb.r, fogRgb.g, fogRgb.b,
+                        std::fmin(fogRgb.r * inv, 999.0f), std::fmin(fogRgb.g * inv, 999.0f),
+                        std::fmin(fogRgb.b * inv, 999.0f), b.r, b.g, b.b, a.r, a.g, a.b, 1.0f - std::exp(-tauSum),
+                        tau[0], tau[1], tau[2], tau[3]);
+        }
+    }
+
+    vf_test_set_config(&cfg);
+    ULONG devRefs = h.dev->Release();
+    ULONG d3dRefs = h.d3d->Release();
+    DestroyWindow(h.window);
+    CoUninitialize();
+    std::printf("\nharbour scene written to %ls (device refs %lu, d3d refs %lu)\n", outDir.c_str(), devRefs, d3dRefs);
+    return 0;
+}
 }
 
 int wmain(int argc, wchar_t** argv)
 {
     std::wstring out = L"harness-out";
     std::string data = "fogdata.bin";
+    std::wstring scene;
     for (int i = 1; i + 1 < argc; ++i)
     {
         if (std::wcscmp(argv[i], L"--out") == 0)
@@ -975,6 +1615,19 @@ int wmain(int argc, wchar_t** argv)
             WideCharToMultiByte(CP_ACP, 0, argv[i + 1], -1, path, MAX_PATH, nullptr, nullptr);
             data = path;
         }
+        if (std::wcscmp(argv[i], L"--scene") == 0)
+        {
+            scene = argv[i + 1];
+            if (i + 2 < argc && argv[i + 2][0] != L'-')
+                out = argv[i + 2];
+        }
+    }
+    if (scene == L"harbour")
+        return RunHarbour(out, data);
+    if (!scene.empty())
+    {
+        std::printf("unknown scene %ls (known: harbour)\n", scene.c_str());
+        return 2;
     }
     return Run(out, data);
 }
