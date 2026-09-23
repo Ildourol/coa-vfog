@@ -207,6 +207,8 @@ bool CappedContinent(int map)
 float FarClipClamp(float value, int map)
 {
     float result = reinterpret_cast<FarClipClampFn>(engine::kFarClipClamp)(value, map);
+    // Rare (farclip changes, map loads, zone changes), and the fog's own reload does not run while it is off.
+    GlobalConfig().ReloadIfChanged();
     const float lift = GlobalConfig().Get().farClipMax;
     if (lift > 0.0f && CappedContinent(map) && std::isfinite(value))
         result = std::max(result, std::clamp(value, kEngineFarClipMin, std::min(lift, kEngineFarClipMax)));

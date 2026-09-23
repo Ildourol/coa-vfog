@@ -33,8 +33,8 @@ constexpr int kFogLayers = 4;
 
 struct FogParams
 {
-    // Three scene layers (Classic-authored or derived) and, with derived layers, the distance fog that replaces
-    // the stock fog.
+    // Three scene layers (Classic-authored or derived) and the distance fog that replaces the stock fog (with
+    // Classic layers only where they thin out).
     FogLayer layers[kFogLayers];
     float lightColor[3];
     float rayColor[3];

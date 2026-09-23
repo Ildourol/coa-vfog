@@ -574,11 +574,101 @@ void CheckClassicData(const FogData& data)
     Check(!data.Resolve(530, harbour, 0.75f, 0, none), "maps without Classic lights fall back to derived layers");
 }
 
+// Fog opacity along a level ray at the camera's height, as the horizon fade marches it (sun visible).
+float LevelRayOpacity(const FogParams& fog, float camZ, float distance)
+{
+    const int n = 8192;
+    const float dt = distance / n;
+    double tau = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        const float t = (i + 0.5f) * dt;
+        for (const FogLayer& l : fog.layers)
+        {
+            if (t < l.start || t > l.limit)
+                continue;
+            float curve =
+                1.0f + l.strength * std::pow(std::fmin(std::fmax(t - l.start, 0.0f) / fog.maxDistance, 1.0f) + 1e-6f,
+                                             l.exponent);
+            float heightF = std::fmin(std::exp((l.upperHeight - camZ) * l.upperFalloff), 1.0f) *
+                            std::fmin(std::exp((camZ - l.lowerHeight) * l.lowerFalloff), 1.0f);
+            float shadow = l.shadowed > 0.0f ? l.shadowDensity + (1.0f - l.shadowDensity) * fog.shadowLight : 1.0f;
+            tau += l.density * curve * heightF * shadow * dt;
+        }
+    }
+    return static_cast<float>(1.0 - std::exp(-tau));
+}
+
+// The distance fog with Classic layers: absent where they hide the far clip, present across the coverage edge and
+// where they are thin, so the far clip stays hidden and the switch to derived layers does not jump.
+void CheckDistanceFogWithClassic(const FogData& data)
+{
+    const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const D3DVIEWPORT9 vp = {0, 0, 1280, 720, 0.0f, 0.94f};
+    Config cfg = {};
+    auto frame = [&](int map, Vec3 eye, float day, Vec3 toLight, bool moon, float fogStart, float farClip) {
+        FrameInputs in = MakeInputs(identity, identity, eye, Add(eye, {100, 0, 0}), vp);
+        in.mapId = map;
+        in.dayFraction = day;
+        Vec3 l = Norm(toLight);
+        in.toLight[0] = l.x;
+        in.toLight[1] = l.y;
+        in.toLight[2] = l.z;
+        in.lightIsMoon = moon;
+        in.fogStart = fogStart;
+        in.fogEnd = farClip;
+        in.zoneFogDistance = farClip;
+        in.farClip = farClip;
+        return in;
+    };
+
+    // Stormwind harbour at 18:43: dense Classic fog, no distance fog.
+    FrameInputs harbour = frame(0, {-8576.0f, 1007.0f, 104.0f}, 0.7802f, {0.673f, 0.673f, 0.307f}, false, 197.9f, 791.6f);
+    AuthoredFog fog = {};
+    bool resolved = data.Resolve(0, harbour.camPos, harbour.dayFraction, 0, fog);
+    FogParams p = BuildFogParams(harbour, cfg, resolved ? &fog : nullptr);
+    float horizon = LevelRayOpacity(p, harbour.camPos[2], p.maxDistance);
+    std::printf("     harbour 18:43: coverage %.2f, distance fog density %.6f, level-ray opacity %.3f\n", fog.coverage,
+                p.layers[3].density, horizon);
+    Check(resolved && p.layers[3].density == 0.0f && horizon > 0.97f,
+          "dense Classic layers hide the far clip without the distance fog");
+
+    // Hyjal at midnight: thin, absolute-height Classic layers; the distance fog fills in.
+    FrameInputs hyjal = frame(1, {5458.0f, -2934.0f, 1481.0f}, 0.0f, {0.63f, 0.63f, 0.455f}, true, 197.9f, 791.6f);
+    resolved = data.Resolve(1, hyjal.camPos, hyjal.dayFraction, 0, fog);
+    p = BuildFogParams(hyjal, cfg, resolved ? &fog : nullptr);
+    horizon = LevelRayOpacity(p, hyjal.camPos[2], p.maxDistance);
+    std::printf("     Hyjal 00:00: coverage %.2f, distance fog density %.6f, level-ray opacity %.3f\n", fog.coverage,
+                p.layers[3].density, horizon);
+    Check(resolved && p.layers[3].density > 0.0f && horizon > 0.94f,
+          "thin Classic layers keep enough distance fog to hide the far clip");
+
+    // Blasted Lands at noon: walking out of light 19 (no Classic fog, falloff 394-529) into light 1's coverage.
+    const Vec3 light19 = {-12041.6f, -2450.3f, 0.0f};
+    FrameInputs inside = frame(0, Add(light19, {0, -455.0f, 20.0f}), 0.5212f, {0.106f, 0.106f, 0.989f}, false, 197.9f,
+                               791.6f);
+    FrameInputs outside = frame(0, Add(light19, {0, -465.0f, 20.0f}), 0.5212f, {0.106f, 0.106f, 0.989f}, false,
+                                197.9f, 791.6f);
+    AuthoredFog in19 = {};
+    AuthoredFog out19 = {};
+    bool derivedSide = !data.Resolve(0, inside.camPos, inside.dayFraction, 0, in19);
+    bool classicSide = data.Resolve(0, outside.camPos, outside.dayFraction, 0, out19);
+    FogParams pin = BuildFogParams(inside, cfg, nullptr);
+    FogParams pout = BuildFogParams(outside, cfg, classicSide ? &out19 : nullptr);
+    float oin = LevelRayOpacity(pin, inside.camPos[2], 450.0f);
+    float oout = LevelRayOpacity(pout, outside.camPos[2], 450.0f);
+    std::printf("     light 19 edge at noon: derived %.3f, Classic (coverage %.2f) %.3f opacity at 450 yd\n", oin,
+                out19.coverage, oout);
+    Check(derivedSide && classicSide && std::fabs(oin - oout) < 0.08f,
+          "distance fog does not jump where Classic coverage ends");
+}
+
 int Run(const std::wstring& outDir, const std::string& dataPath)
 {
     FogData classic;
     Check(classic.Load(dataPath), "Classic fog data loads");
     CheckClassicData(classic);
+    CheckDistanceFogWithClassic(classic);
 
     CreateDirectoryW(outDir.c_str(), nullptr);
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -650,7 +740,10 @@ int Run(const std::wstring& outDir, const std::string& dataPath)
 
     Config cfg = {};
     cfg.maxDistance = 5000.0f;
-    vf_test_set_config(&cfg);
+    // The state and every-frame checks run the god-ray passes too (off by default).
+    Config loopCfg = cfg;
+    loopCfg.godRays = 0.2f;
+    vf_test_set_config(&loopCfg);
 
     Image before;
     Image after;

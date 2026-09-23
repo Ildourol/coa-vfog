@@ -11,7 +11,6 @@ namespace
 {
 constexpr uint32_t kVersion = 1;
 constexpr float kHalfMinutesPerDay = 2880.0f;
-constexpr float kMinimumCoveredWeight = 0.5f;
 constexpr uint32_t kSlotClear = 0;
 
 struct Header
@@ -247,11 +246,12 @@ bool FogData::Resolve(int map, const float* pos, float dayFraction, int slot, Au
         out.lightWeights[out.lightCount] = all[i].weight;
         ++out.lightCount;
     }
-    if (covered < kMinimumCoveredWeight)
+    if (covered < kMinimumFogCoverage)
     {
         std::memset(&out, 0, sizeof(out));
         return false;
     }
+    out.coverage = covered;
     for (int i = 0; i < out.lightCount; ++i)
         out.lightWeights[i] /= covered;
     for (int i = 0; i < allCount; ++i)

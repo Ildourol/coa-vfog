@@ -32,7 +32,9 @@ data is Classic-derived; keep it in private repositories.
 - **Ground mist** that hugs the terrain around the player; zones with short stock fog get more.
 - **Distance fog** that replaces the stock linear fog on maps without Classic data: it turns opaque where
   the stock fog did, is lit by the direct light (warm at sunset), and fades into a horizon band on the sky.
-  With Classic layers the geometry near the far clip fades into the sky column instead.
+  With Classic layers the geometry near the far clip fades into the sky column instead; the distance fog
+  returns only across the edge of Classic coverage and where the Classic layers are too thin to hide the
+  far clip.
 - **Forward scattering** around the sun or moon (Henyey–Greenstein phase).
 - **Light shafts**: in-scattering is shadowed by a screen-space march toward the light, so trees,
   buildings and terrain cast shafts into the fog.
@@ -40,7 +42,8 @@ data is Classic-derived; keep it in private repositories.
 
 The effect is composited over the world before glow and the UI. The client's glow (`screen + g·blur²`, with
 `g` from the day/night light) runs afterwards and would bleach bright fog to white, so fogged pixels are
-pre-compensated with the live glow amount. While the effect draws, the stock fog is pushed out of range for
+pre-compensated with the live glow amount. Its other term, a blend toward the blur while drunk or under
+water, is left as is. While the effect draws, the stock fog is pushed out of range for
 the world render and restored afterwards; a frame the effect skips keeps the stock fog.
 
 **View distance.** Ascension's Extensions.dll detours the far-clip clamp (`0x780770`) and caps maps 0, 1, 530
@@ -139,7 +142,7 @@ writes `CoAVolFog.log` next to itself.
 | `LightShafts` | 1 | Shadowed in-scattering |
 | `GodRays` | 0 | Radial sky rays, 0 = off |
 | `GlowCompensation` | 1 | Pre-compensate the fog for the client's glow |
-| `FarClipMax` | 1583 | Continent view distance up to 1583 yd, within the `farclip` setting (0 = Ascension's 791 cap). Switching it on or off needs a restart; values apply at the next `farclip` change or map load |
+| `FarClipMax` | 1583 | Continent view distance up to 1583 yd, within the `farclip` setting (0 = Ascension's 791 cap). Turning it on from 0 needs a restart; other changes (including 0) apply at the next `farclip` change, map load or zone change, where raising it shows a loading screen |
 | `MaxDistance` | 5000 | Fog range: sky integration length and the Classic distance-curve scale |
 | `Temporal` | 0.85 | History weight, 0 = off |
 | `Underwater` | 0 | Keep the effect under water |

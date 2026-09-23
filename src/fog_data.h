@@ -26,6 +26,8 @@ struct AuthoredLayer
 };
 
 constexpr int kMaxAuthoredLayers = 3;
+// Classic fog applies where lights carrying it hold at least this much of the blend weight.
+constexpr float kMinimumFogCoverage = 0.5f;
 constexpr int kMaxBlendedLights = 4;
 
 struct AuthoredFog
@@ -35,6 +37,8 @@ struct AuthoredFog
     int lightCount;
     uint32_t lightIds[kMaxBlendedLights];
     float lightWeights[kMaxBlendedLights];
+    // Weight of the lights that carry Classic fog, before renormalisation (0.5..1 when resolved).
+    float coverage;
 };
 
 class FogData

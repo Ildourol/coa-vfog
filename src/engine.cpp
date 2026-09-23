@@ -178,7 +178,9 @@ bool BuildFrameInputsUnsafe(FrameInputs& out)
     out.glow = 0.0f;
     uintptr_t ffx = Read<uintptr_t>(kFfxCVar);
     uintptr_t effect = Read<uintptr_t>(kCurrentScreenEffect);
-    if (ffx && Read<int32_t>(ffx + kCVarInt) != 0 && effect && effect == Read<uintptr_t>(kGlowEffect))
+    // In liquid the client swaps to the wave-glow pass list with a different formula; the fog is skipped there
+    // by default anyway.
+    if (!out.inLiquid && ffx && Read<int32_t>(ffx + kCVarInt) != 0 && effect && effect == Read<uintptr_t>(kGlowEffect))
     {
         uintptr_t glowCVar = Read<uintptr_t>(effect + kGlowEffectCVar);
         float glow = Read<float>(kDayNightGlow);

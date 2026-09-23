@@ -180,6 +180,25 @@ void DistanceLayer(const FrameInputs& in, const Config& cfg, const FogParams& p,
     std::memcpy(out.shadowEmissive, out.emissive, sizeof(out.emissive));
 }
 
+// Optical depth of the Classic layers along the level ray the horizon fade marches to the fog range, at the
+// camera's height (shadowed layers take their shadow density to the extent the light is below the horizon).
+float LevelOpticalDepth(const FogParams& p, float camZ)
+{
+    float tau = 0.0f;
+    for (int i = 0; i < 3; ++i)
+    {
+        const FogLayer& l = p.layers[i];
+        const float length = std::max(p.maxDistance - l.start, 0.0f);
+        const float u = length / p.maxDistance;
+        const float path = length + l.strength * p.maxDistance * std::pow(u, l.exponent + 1.0f) / (l.exponent + 1.0f);
+        const float heightF = std::min(std::exp((l.upperHeight - camZ) * l.upperFalloff), 1.0f) *
+                              std::min(std::exp((camZ - l.lowerHeight) * l.lowerFalloff), 1.0f);
+        const float shadow = l.shadowed > 0.0f ? l.shadowDensity + (1.0f - l.shadowDensity) * p.shadowLight : 1.0f;
+        tau += l.density * heightF * shadow * path;
+    }
+    return tau;
+}
+
 // God rays take the hue of the Classic halo (the most forward-scattering layer) rather than the pale sun disc.
 // Like the sun colour they replace, it stays display-referred: the rays are a display-space overlay.
 bool HaloColor(const AuthoredFog& fog, float* out)
@@ -234,14 +253,17 @@ FogParams BuildFogParams(const FrameInputs& in, const Config& cfg, const Authore
 
     // Classic layers scatter the light as authored for the time of day, with no elevation fade (modern
     // injection: diffuse * intensity * HG); only shadowed layers react to the light setting, through shadowLight.
-    // They need no distance fog of ours: the horizon fade hides the far clip, as the modern client has no other
-    // fog term within view range.
+    // Where they are dense enough, the horizon fade alone hides the far clip, as the modern client has no other
+    // fog term within view range. The distance fog stays only where they thin out: across the coverage edge,
+    // where the derived layers take over, and where the level ray to the fog range stays thin.
     if (p.authored)
     {
         AuthoredLayers(*authored, cfg, p, cfg.sunScatter, p.layers);
         HaloColor(*authored, p.rayColor);
-        p.layers[3] = FogLayer{};
-        Unbounded(p.layers[3]);
+        DistanceLayer(in, cfg, p, sun, fogColor, p.layers[3]);
+        const float edge = 1.0f - SmoothStep(kMinimumFogCoverage, 1.0f, authored->coverage);
+        const float thin = std::clamp(1.0f - LevelOpticalDepth(p, in.camPos[2]) / kFarOpticalDepth, 0.0f, 1.0f);
+        p.layers[3].density *= std::max(edge, thin);
     }
     else
     {
