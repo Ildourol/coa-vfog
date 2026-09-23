@@ -9,7 +9,7 @@ struct FogLayer
     float start;
     float density;
     float g;
-    float unused;
+    float isotropic;
     float emissive[3];
     float strength;
     float diffuse[3];
@@ -24,6 +24,7 @@ struct FogParams
 {
     FogLayer layers[2];
     float lightColor[3];
+    float rayColor[3];
     float lightVisibility;
     float maxDistance;
     float horizonStart;

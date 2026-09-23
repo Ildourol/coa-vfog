@@ -23,6 +23,8 @@ struct FrameInputs
     uint32_t ambientColor;
     float fogStart;
     float fogEnd;
+    // The zone's own fog distance (light float band 0) before the far clip caps it into fogEnd.
+    float zoneFogDistance;
     float farClip;
     bool inLiquid;
 };

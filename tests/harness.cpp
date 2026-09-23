@@ -40,7 +40,11 @@ struct Vec3
     float x, y, z;
 };
 
+Vec3 Add(Vec3 a, Vec3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 Vec3 Sub(Vec3 a, Vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+
+// Game-like world coordinates, so camera-relative rendering is exercised at a realistic distance and height.
+constexpr Vec3 kWorldOffset = {-9100.0f, -100.0f, 80.0f};
 Vec3 Cross(Vec3 a, Vec3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
 float Dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 Vec3 Norm(Vec3 a)
@@ -49,13 +53,14 @@ Vec3 Norm(Vec3 a)
     return {a.x / l, a.y / l, a.z / l};
 }
 
-// World (Z up) -> view (x right, y up, z forward), row vectors.
+// World (Z up) -> view (x right, y up, z forward), row vectors. Like the client, the view is camera-relative:
+// it has no translation, and geometry is drawn with the camera position subtracted.
 void LookAt(Vec3 eye, Vec3 at, float* m)
 {
     Vec3 f = Norm(Sub(at, eye));
     Vec3 r = Norm(Cross(f, {0, 0, 1}));
     Vec3 u = Cross(r, f);
-    float v[16] = {r.x, u.x, f.x, 0, r.y, u.y, f.y, 0, r.z, u.z, f.z, 0, -Dot(r, eye), -Dot(u, eye), -Dot(f, eye), 1};
+    float v[16] = {r.x, u.x, f.x, 0, r.y, u.y, f.y, 0, r.z, u.z, f.z, 0, 0, 0, 0, 1};
     std::memcpy(m, v, sizeof(v));
 }
 
@@ -84,12 +89,11 @@ struct SceneVertex
 
 void AddQuad(std::vector<SceneVertex>& v, Vec3 a, Vec3 b, Vec3 c, Vec3 d, DWORD color)
 {
-    v.push_back({a.x, a.y, a.z, color});
-    v.push_back({b.x, b.y, b.z, color});
-    v.push_back({c.x, c.y, c.z, color});
-    v.push_back({a.x, a.y, a.z, color});
-    v.push_back({c.x, c.y, c.z, color});
-    v.push_back({d.x, d.y, d.z, color});
+    for (Vec3 p : {a, b, c, a, c, d})
+    {
+        Vec3 w = Add(p, kWorldOffset);
+        v.push_back({w.x, w.y, w.z, color});
+    }
 }
 
 void AddBox(std::vector<SceneVertex>& v, Vec3 lo, Vec3 hi, DWORD color)
@@ -339,12 +343,15 @@ struct Harness
         dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0xFF6FA0DC, 1.0f, 0);
     }
 
-    void DrawScene(const float* view, const float* engineProj, const D3DVIEWPORT9& vp)
+    void DrawScene(Vec3 eye, const float* view, const float* engineProj, const D3DVIEWPORT9& vp)
     {
         float d3dProj[16];
         D3DProjection(engineProj, d3dProj);
         D3DMATRIX identity = {};
         identity._11 = identity._22 = identity._33 = identity._44 = 1.0f;
+        identity._41 = -eye.x;
+        identity._42 = -eye.y;
+        identity._43 = -eye.z;
         dev->SetTransform(D3DTS_WORLD, &identity);
         dev->SetTransform(D3DTS_VIEW, reinterpret_cast<const D3DMATRIX*>(view));
         dev->SetTransform(D3DTS_PROJECTION, reinterpret_cast<const D3DMATRIX*>(d3dProj));
@@ -421,6 +428,7 @@ FrameInputs MakeInputs(const float* view, const float* proj, Vec3 eye, Vec3 at, 
     in.ambientColor = 0xFF404858;
     in.fogStart = 150.0f;
     in.fogEnd = 600.0f;
+    in.zoneFogDistance = 600.0f;
     in.farClip = kFar;
     in.inLiquid = false;
     return in;
@@ -535,8 +543,8 @@ int Run(const std::wstring& outDir)
     const D3DVIEWPORT9 world = {0, 0, 1280, 688, 0.0f, 1.0f};
     float proj[16];
     EngineProjection(aspect, proj);
-    Vec3 eye = {0, 0, 9};
-    Vec3 at = {100, 2, 4};
+    Vec3 eye = Add({0, 0, 9}, kWorldOffset);
+    Vec3 at = Add({100, 2, 4}, kWorldOffset);
     float view[16];
 
     Config cfg = {};
@@ -553,7 +561,7 @@ int Run(const std::wstring& outDir)
         Vec3 e = {eye.x + frame * 0.6f, eye.y, eye.z};
         LookAt(e, at, view);
         h.BeginFrame();
-        h.DrawScene(view, proj, world);
+        h.DrawScene(e, view, proj, world);
         if (frame == 11)
             before = Capture(h.dev);
         h.SetEngineState(world);
@@ -626,7 +634,7 @@ int Run(const std::wstring& outDir)
         vf_test_set_config(&c);
         LookAt(eye, at, view);
         h.BeginFrame();
-        h.DrawScene(view, proj, world);
+        h.DrawScene(eye, view, proj, world);
         FrameInputs in = MakeInputs(view, proj, eye, at, world);
         in.farClip = std::fmin(in.farClip, maxDist);
         vf_test_render(&in, &skip);
@@ -678,7 +686,7 @@ int Run(const std::wstring& outDir)
         LookAt(eye, at, view);
         FrameInputs in = MakeInputs(view, proj, eye, at, world);
         h.BeginFrame();
-        h.DrawScene(view, proj, world);
+        h.DrawScene(eye, view, proj, world);
         vf_test_render(&in, &skip);
         Image single = Capture(h.dev);
         h.dev->EndScene();
@@ -688,7 +696,7 @@ int Run(const std::wstring& outDir)
         for (int frame = 0; frame < 16; ++frame)
         {
             h.BeginFrame();
-            h.DrawScene(view, proj, world);
+            h.DrawScene(eye, view, proj, world);
             vf_test_render(&in, &skip);
             if (frame == 15)
                 accumulated = Capture(h.dev);
@@ -719,7 +727,7 @@ int Run(const std::wstring& outDir)
                      ray.x * view[4] + ray.y * view[5] + ray.z * view[6],
                      ray.x * view[8] + ray.y * view[9] + ray.z * view[10]};
         (void)inv;
-        float viewZ = -eye.z / dirW.z;
+        float viewZ = -(eye.z - kWorldOffset.z) / dirW.z;
         float expected = std::fmin(viewZ / 255.0f, 1.0f);
         float got = depthView.At(px, py)[2] / 255.0f;
         std::printf("     ground view depth: expected %.2f yd, shader %.2f yd\n", viewZ, got * 255.0f);
@@ -747,7 +755,7 @@ int Run(const std::wstring& outDir)
     EngineProjection(1024.0f / 600.0f, proj);
     LookAt(eye, at, view);
     h.BeginFrame();
-    h.DrawScene(view, proj, resized);
+    h.DrawScene(eye, view, proj, resized);
     FrameInputs in = MakeInputs(view, proj, eye, at, resized);
     Check(vf_test_render(&in, &skip) != 0, (std::string("fog renders after Reset ") + skip).c_str());
     h.dev->EndScene();

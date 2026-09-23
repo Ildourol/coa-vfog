@@ -7,18 +7,20 @@
 namespace
 {
 constexpr float kHazeDensity = 0.00035f;
-constexpr float kHazeG = 0.72f;
+constexpr float kHazeG = 0.75f;
+constexpr float kHazeIsotropic = 0.3f;
 constexpr float kHazeFalloff = 1.0f / 220.0f;
-constexpr float kHazeSun = 1.6f;
-constexpr float kHazeAmbient = 0.85f;
+constexpr float kHazeSun = 1.3f;
+constexpr float kHazeAmbient = 0.8f;
 constexpr float kHazeShadowDensity = 0.75f;
 
 constexpr float kGroundStart = 12.0f;
 constexpr float kGroundOpticalDepth = 1.1f;
-constexpr float kGroundG = 0.35f;
+constexpr float kGroundG = 0.4f;
+constexpr float kGroundIsotropic = 0.5f;
 constexpr float kGroundFalloff = 1.0f / 18.0f;
-constexpr float kGroundSun = 0.6f;
-constexpr float kGroundAmbient = 0.8f;
+constexpr float kGroundSun = 0.8f;
+constexpr float kGroundAmbient = 0.75f;
 constexpr float kGroundShadowDensity = 0.85f;
 
 constexpr float kMoonLight = 0.35f;
@@ -60,7 +62,8 @@ FogParams BuildFogParams(const FrameInputs& in, const Config& cfg)
     FogParams p = {};
     float fogColor[3];
     UnpackColor(in.fogColor, fogColor);
-    UnpackColor(in.lightIsMoon ? in.directColor : in.sunColor, p.lightColor);
+    UnpackColor(in.directColor, p.lightColor);
+    UnpackColor(in.lightIsMoon ? in.directColor : in.sunColor, p.rayColor);
 
     p.lightVisibility = SmoothStep(-0.03f, 0.10f, in.toLight[2]) * (in.lightIsMoon ? kMoonLight : 1.0f);
     p.farClip = in.farClip;
@@ -68,8 +71,9 @@ FogParams BuildFogParams(const FrameInputs& in, const Config& cfg)
     p.horizonStart = in.farClip * 0.85f;
     p.referenceZ = ReferenceZ(in);
 
-    float fogEnd = std::clamp(in.fogEnd, 50.0f, 5000.0f);
-    float foggyZone = std::clamp(700.0f / fogEnd, 0.6f, 2.5f);
+    float fogDistance = in.zoneFogDistance > 50.0f && in.zoneFogDistance < 20000.0f ? in.zoneFogDistance : in.fogEnd;
+    fogDistance = std::clamp(fogDistance, 50.0f, 5000.0f);
+    float foggyZone = std::clamp(700.0f / fogDistance, 0.6f, 2.5f);
     float shadowed = cfg.lightShafts ? 1.0f : 0.0f;
     float sun = p.lightVisibility * cfg.sunScatter;
 
@@ -77,6 +81,7 @@ FogParams BuildFogParams(const FrameInputs& in, const Config& cfg)
     haze.start = 0.0f;
     haze.density = kHazeDensity * cfg.haze * cfg.density * foggyZone;
     haze.g = kHazeG;
+    haze.isotropic = kHazeIsotropic;
     Scale(fogColor, kHazeAmbient * cfg.ambient, haze.emissive);
     haze.strength = 0.0f;
     Scale(p.lightColor, kHazeSun * sun, haze.diffuse);
@@ -88,8 +93,9 @@ FogParams BuildFogParams(const FrameInputs& in, const Config& cfg)
 
     FogLayer& ground = p.layers[1];
     ground.start = kGroundStart;
-    ground.density = kGroundOpticalDepth * cfg.groundFog * cfg.density / std::max(fogEnd, 250.0f);
+    ground.density = kGroundOpticalDepth * cfg.groundFog * cfg.density / std::max(fogDistance, 250.0f);
     ground.g = kGroundG;
+    ground.isotropic = kGroundIsotropic;
     Scale(fogColor, kGroundAmbient * cfg.ambient, ground.emissive);
     ground.strength = 0.0f;
     Scale(p.lightColor, kGroundSun * sun, ground.diffuse);

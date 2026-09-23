@@ -344,8 +344,16 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
     if (!EnsureTargets(dev, lowW, lowH, rayW, rayH))
         return false;
 
+    // The client renders camera-relative: its view matrix carries no translation. Rebuild the
+    // absolute world transform from the camera position so heights and reprojection are in world space.
     float invView[16];
+    float viewAbs[16];
     if (!Invert4x4(in.view, invView))
+        return Skip("view matrix not invertible");
+    invView[12] = in.camPos[0];
+    invView[13] = in.camPos[1];
+    invView[14] = in.camPos[2];
+    if (!Invert4x4(invView, viewAbs))
         return Skip("view matrix not invertible");
 
     const FogParams fog = BuildFogParams(in, cfg);
@@ -413,9 +421,10 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
         VF_LOG_INFO("  day %.4f %s toLight (%.3f %.3f %.3f) view (%.3f %.3f %.3f) vis %.2f sunPx (%.0f %.0f) rays %.2f",
                     in.dayFraction, in.lightIsMoon ? "moon" : "sun", in.toLight[0], in.toLight[1], in.toLight[2],
                     toLightV[0], toLightV[1], toLightV[2], fog.lightVisibility, sunPx[0], sunPx[1], rayStrength);
-        VF_LOG_INFO("  fog %08X start %.1f end %.1f sun %08X direct %08X ambient %08X refZ %.1f haze %.6f ground %.6f",
-                    in.fogColor, in.fogStart, in.fogEnd, in.sunColor, in.directColor, in.ambientColor, fog.referenceZ,
-                    fog.layers[0].density, fog.layers[1].density);
+        VF_LOG_INFO("  fog %08X start %.1f end %.1f zone %.1f sun %08X direct %08X ambient %08X refZ %.1f haze %.6f "
+                    "ground %.6f",
+                    in.fogColor, in.fogStart, in.fogEnd, in.zoneFogDistance, in.sunColor, in.directColor,
+                    in.ambientColor, fog.referenceZ, fog.layers[0].density, fog.layers[1].density);
     }
 
     dev->SetDepthStencilSurface(nullptr);
@@ -518,7 +527,7 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
     dev->SetPixelShader(m_composite);
     const Float4 composite[3] = {
         {cfg.exposure, rays ? rayStrength : 0.0f, static_cast<float>(cfg.debugView), 0.0f},
-        {fog.lightColor[0], fog.lightColor[1], fog.lightColor[2], 0.0f},
+        {fog.rayColor[0], fog.rayColor[1], fog.rayColor[2], 0.0f},
         {sunPx[0], sunPx[1], cfg.sunMarker && sunInFront ? 1.0f : 0.0f, 0.0f},
     };
     dev->SetPixelShaderConstantF(9, &composite[0].x, 3);
@@ -527,7 +536,7 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
     BindTexture(dev, 2, m_rays[1], true);
     DrawFullscreen(dev);
 
-    std::memcpy(m_prevView, in.view, sizeof(m_prevView));
+    std::memcpy(m_prevView, viewAbs, sizeof(m_prevView));
     std::memcpy(m_prevProj, in.proj, sizeof(m_prevProj));
     std::memcpy(m_prevCam, in.camPos, sizeof(m_prevCam));
     m_prevViewport = vp;

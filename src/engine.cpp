@@ -32,6 +32,7 @@ constexpr uintptr_t kFogEnd = 0x00D38BA8;
 constexpr uintptr_t kAmbientColor = 0x00D38BD4;
 constexpr uintptr_t kDirectColor = 0x00D38BD8;
 constexpr uintptr_t kSunColor = 0x00D38BF8;
+constexpr uintptr_t kZoneFogDistance = 0x00D38C1C;
 constexpr uintptr_t kSunPosition = 0x00D38E28;
 constexpr uintptr_t kMoonPosition = 0x00D38E48;
 constexpr uintptr_t kSunDayEnd = 0x00A41CA0;
@@ -144,10 +145,13 @@ bool BuildFrameInputsUnsafe(FrameInputs& out)
     out.ambientColor = Read<uint32_t>(kAmbientColor);
     out.inLiquid = Read<uint32_t>(kCameraInLiquid) != 0;
 
-    out.farClip = 0.0f;
-    uintptr_t worldFrame = Read<uintptr_t>(kWorldFrame);
-    if (worldFrame)
-        out.farClip = Read<float>(worldFrame + kWorldFrameFarClip);
+    out.zoneFogDistance = Read<float>(kZoneFogDistance);
+    out.farClip = out.proj[14] / (1.0f - out.proj[10]);
+    if (!(out.farClip > 10.0f && out.farClip < 100000.0f))
+    {
+        uintptr_t worldFrame = Read<uintptr_t>(kWorldFrame);
+        out.farClip = worldFrame ? Read<float>(worldFrame + kWorldFrameFarClip) : 0.0f;
+    }
     if (!(out.farClip > 10.0f && out.farClip < 100000.0f))
         out.farClip = 1000.0f;
 

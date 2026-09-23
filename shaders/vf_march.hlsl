@@ -10,7 +10,7 @@
 float4 cToLight  : register(c9);   // xyz toward-light direction (view space), w = light visibility
 float4 cShadow   : register(c10);  // x = min step (yd), y = step per yard of distance, z = enabled, w = thickness in steps
 float4 cMarch    : register(c11);  // x = jitter, y = distance-curve range, z = horizon blend start, w = far clip
-float4 cLayer[8] : register(c12);  // two layers of four float4, see fog_model.cpp
+float4 cLayer[8] : register(c12);  // two layers of four float4, see FogLayer in fog_model.h
 
 sampler2D sDepth : register(s0);
 
@@ -71,8 +71,8 @@ float4 main(float2 vpos : VPOS) : COLOR0
     float3 camW = cInvView[3].xyz;
     float3 dirW = mul(V, (float3x3)cInvView);
     float cosT = dot(cToLight.xyz, V);
-    float phase0 = PhaseHG(cLayer[0].z, cosT);
-    float phase1 = PhaseHG(cLayer[4].z, cosT);
+    float phase0 = lerp(PhaseHG(cLayer[0].z, cosT), 1, cLayer[0].w);
+    float phase1 = lerp(PhaseHG(cLayer[4].z, cosT), 1, cLayer[4].w);
 
     float3 L = 0;
     float T = 1;
