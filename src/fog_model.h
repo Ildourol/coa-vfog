@@ -4,7 +4,6 @@
 #include "engine.h"
 #include "fog_data.h"
 
-// One fog layer in shader order: six float4 registers (see AccumulateLayer in vf_march.hlsl).
 struct FogLayer
 {
     float start;
@@ -22,26 +21,22 @@ struct FogLayer
     float shadowEmissive[3];
     float shadowDensity;
     float shadowed;
-    // Sky rays only: density scales by exp(-skyFalloff * max(dir.z, 0)), leaving a horizon band.
     float skyFalloff;
-    // Distance beyond which the layer stops accumulating.
     float limit;
     float unused;
 };
+
+static_assert(sizeof(FogLayer) == 6 * sizeof(float[4]), "FogLayer uploads as a march layer's six float4 registers");
 
 constexpr int kFogLayers = 4;
 
 struct FogParams
 {
-    // Three scene layers (Classic-authored or derived) and the distance fog that replaces the stock fog (with
-    // Classic layers only where they thin out).
     FogLayer layers[kFogLayers];
     float lightColor[3];
     float rayColor[3];
     float lightVisibility;
-    // The modern sunAboveHorizon: shadowed Classic layers treat a light below the horizon as shadow.
     float lightAboveHorizon;
-    // Multiplies the shadow-march visibility of shadowed layers (lightAboveHorizon for Classic layers).
     float shadowLight;
     float maxDistance;
     float horizonStart;

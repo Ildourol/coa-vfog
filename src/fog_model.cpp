@@ -31,20 +31,23 @@ constexpr float kFarIsotropic = 0.7f;
 constexpr float kFarSun = 0.45f;
 constexpr float kFarAmbient = 0.6f;
 constexpr float kFarSkyFalloff = 10.0f;
+constexpr float kFarExponent = 2.0f;
 
 constexpr float kClassicUnits = 0.01f;
 constexpr float kFogRangeMargin = 300.0f;
 constexpr uint32_t kFlagShadowed = 0x1;
 constexpr uint32_t kFlagRelativeHeights = 0x2;
 
-// Range the derived haze and mist were tuned for; Classic layers use the full fog range like the modern client.
-constexpr float kDerivedRange = 1500.0f;
+constexpr float kDerivedLayerLimit = 1500.0f;
 
 constexpr float kMoonLight = 0.35f;
-// Half-width, in toLight.z, of the band in which the light sets below the horizon.
-constexpr float kHorizonBand = 0.02f;
+constexpr float kLightSettingHalfWidth = 0.02f;
 constexpr float kReferenceFarTarget = 200.0f;
 constexpr float kNoLimit = 1.0e9f;
+
+constexpr int kSceneLayers = 3;
+constexpr int kDistanceFogLayer = kSceneLayers;
+static_assert(kDistanceFogLayer + 1 == kFogLayers, "the distance fog follows the scene layers");
 
 float SmoothStep(float e0, float e1, float x)
 {
@@ -82,7 +85,7 @@ void Unbounded(FogLayer& l)
     l.limit = kNoLimit;
 }
 
-void DerivedLayers(const FrameInputs& in, const Config& cfg, const FogParams& p, float sun, float fogDistance,
+void DerivedLayers(const FrameInputs& in, const Config& cfg, const FogParams& p, float sunScatter, float fogDistance,
                    const float* fogColor, FogLayer* out)
 {
     float foggyZone = std::clamp(700.0f / fogDistance, 0.6f, 2.5f);
@@ -94,7 +97,7 @@ void DerivedLayers(const FrameInputs& in, const Config& cfg, const FogParams& p,
     haze.g = kHazeG;
     haze.isotropic = kHazeIsotropic;
     Scale(fogColor, kHazeAmbient * cfg.ambient, haze.emissive);
-    Scale(p.lightColor, kHazeSun * sun, haze.diffuse);
+    Scale(p.lightColor, kHazeSun * sunScatter, haze.diffuse);
     haze.exponent = 1.0f;
     haze.upperHeight = p.referenceZ;
     haze.upperFalloff = kHazeFalloff;
@@ -102,7 +105,7 @@ void DerivedLayers(const FrameInputs& in, const Config& cfg, const FogParams& p,
     haze.shadowDensity = kHazeShadowDensity;
     haze.shadowed = shadowed;
     Unbounded(haze);
-    haze.limit = kDerivedRange;
+    haze.limit = kDerivedLayerLimit;
 
     FogLayer& ground = out[1];
     ground.start = kGroundStart;
@@ -110,7 +113,7 @@ void DerivedLayers(const FrameInputs& in, const Config& cfg, const FogParams& p,
     ground.g = kGroundG;
     ground.isotropic = kGroundIsotropic;
     Scale(fogColor, kGroundAmbient * cfg.ambient, ground.emissive);
-    Scale(p.lightColor, kGroundSun * sun, ground.diffuse);
+    Scale(p.lightColor, kGroundSun * sunScatter, ground.diffuse);
     ground.exponent = 1.0f;
     ground.upperHeight = p.referenceZ;
     ground.upperFalloff = kGroundFalloff;
@@ -118,15 +121,15 @@ void DerivedLayers(const FrameInputs& in, const Config& cfg, const FogParams& p,
     ground.shadowDensity = kGroundShadowDensity;
     ground.shadowed = shadowed;
     Unbounded(ground);
-    ground.limit = kDerivedRange;
+    ground.limit = kDerivedLayerLimit;
 
     out[2] = FogLayer{};
     Unbounded(out[2]);
 }
 
-void AuthoredLayers(const AuthoredFog& fog, const Config& cfg, const FogParams& p, float sun, FogLayer* out)
+void AuthoredLayers(const AuthoredFog& fog, const Config& cfg, const FogParams& p, float sunScatter, FogLayer* out)
 {
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < kSceneLayers; ++i)
     {
         FogLayer& l = out[i];
         l = FogLayer{};
@@ -153,67 +156,96 @@ void AuthoredLayers(const AuthoredFog& fog, const Config& cfg, const FogParams& 
         Encode(l.emissive, p.linear);
         Encode(l.diffuse, p.linear);
         Encode(l.shadowEmissive, p.linear);
-        Scale(l.diffuse, a.intensity * sun, l.diffuse);
+        Scale(l.diffuse, a.intensity * sunScatter, l.diffuse);
     }
 }
 
-void DistanceLayer(const FrameInputs& in, const Config& cfg, const FogParams& p, float sun, const float* fogColor,
-                   FogLayer& out)
+float DistanceFogOpticalDepthPerDensity(float farStart, float farLimit, float range)
+{
+    const float spanFraction = (farLimit - farStart) / range;
+    return range * (spanFraction + kFarRamp * spanFraction * spanFraction * spanFraction / 3.0f);
+}
+
+void DistanceLayer(const FrameInputs& in, const Config& cfg, const FogParams& p, float sunScatter,
+                   const float* fogColor, FogLayer& out)
 {
     out = FogLayer{};
-    float range = p.maxDistance;
     float farStart = std::min(std::max(in.fogStart, 0.0f), p.farLimit * kFarStartFraction);
-    // Optical depth per unit density from the start to the limit, with the curve measured from the start.
-    float u = (p.farLimit - farStart) / range;
-    float shape = range * (u + kFarRamp * u * u * u / 3.0f);
+    float opticalDepthPerDensity = DistanceFogOpticalDepthPerDensity(farStart, p.farLimit, p.maxDistance);
     out.start = farStart;
-    out.density = cfg.stockFog == 1 && shape > 0.0f ? kFarOpticalDepth * cfg.farFog * cfg.density / shape : 0.0f;
+    out.density = cfg.stockFog == 1 && opticalDepthPerDensity > 0.0f
+                      ? kFarOpticalDepth * cfg.farFog * cfg.density / opticalDepthPerDensity
+                      : 0.0f;
     out.g = kFarG;
     out.isotropic = kFarIsotropic;
     out.strength = kFarRamp;
-    out.exponent = 2.0f;
+    out.exponent = kFarExponent;
     out.shadowDensity = 1.0f;
     out.skyFalloff = kFarSkyFalloff;
     out.limit = p.farLimit;
     Scale(fogColor, kFarAmbient * cfg.ambient, out.emissive);
-    Scale(p.lightColor, kFarSun * sun, out.diffuse);
+    Scale(p.lightColor, kFarSun * sunScatter, out.diffuse);
     std::memcpy(out.shadowEmissive, out.emissive, sizeof(out.emissive));
 }
 
-// Optical depth of the Classic layers along the level ray the horizon fade marches to the fog range, at the
-// camera's height (shadowed layers take their shadow density to the extent the light is below the horizon).
-float LevelOpticalDepth(const FogParams& p, float camZ)
+float RampedPathLength(const FogLayer& l, float range)
 {
-    float tau = 0.0f;
-    for (int i = 0; i < 3; ++i)
-    {
-        const FogLayer& l = p.layers[i];
-        const float length = std::max(p.maxDistance - l.start, 0.0f);
-        const float u = length / p.maxDistance;
-        const float path = length + l.strength * p.maxDistance * std::pow(u, l.exponent + 1.0f) / (l.exponent + 1.0f);
-        const float heightF = std::min(std::exp((l.upperHeight - camZ) * l.upperFalloff), 1.0f) *
-                              std::min(std::exp((camZ - l.lowerHeight) * l.lowerFalloff), 1.0f);
-        const float shadow = l.shadowed > 0.0f ? l.shadowDensity + (1.0f - l.shadowDensity) * p.shadowLight : 1.0f;
-        tau += l.density * heightF * shadow * path;
-    }
-    return tau;
+    const float length = std::max(range - l.start, 0.0f);
+    const float u = length / range;
+    return length + l.strength * range * std::pow(u, l.exponent + 1.0f) / (l.exponent + 1.0f);
 }
 
-// God rays take the hue of the Classic halo (the most forward-scattering layer) rather than the pale sun disc.
-// Like the sun colour they replace, it stays display-referred: the rays are a display-space overlay.
-bool HaloColor(const AuthoredFog& fog, float* out)
+float HeightDensityFactor(const FogLayer& l, float z)
+{
+    return std::min(std::exp((l.upperHeight - z) * l.upperFalloff), 1.0f) *
+           std::min(std::exp((z - l.lowerHeight) * l.lowerFalloff), 1.0f);
+}
+
+float ShadowDensityFactor(const FogLayer& l, float shadowLight)
+{
+    return l.shadowed > 0.0f ? l.shadowDensity + (1.0f - l.shadowDensity) * shadowLight : 1.0f;
+}
+
+float SceneLayersLevelRayOpticalDepth(const FogParams& p, float cameraZ)
+{
+    float opticalDepth = 0.0f;
+    for (int i = 0; i < kSceneLayers; ++i)
+    {
+        const FogLayer& l = p.layers[i];
+        const float heightFactor = HeightDensityFactor(l, cameraZ);
+        const float shadowFactor = ShadowDensityFactor(l, p.shadowLight);
+        opticalDepth += l.density * heightFactor * shadowFactor * RampedPathLength(l, p.maxDistance);
+    }
+    return opticalDepth;
+}
+
+float ClassicFogThinness(const FogParams& p, const AuthoredFog& fog, float cameraZ)
+{
+    const float coverageEdge = 1.0f - SmoothStep(kMinimumFogCoverage, 1.0f, fog.coverage);
+    const float levelRayOpticalDepth = SceneLayersLevelRayOpticalDepth(p, cameraZ);
+    const float levelRayThinness = std::clamp(1.0f - levelRayOpticalDepth / kFarOpticalDepth, 0.0f, 1.0f);
+    return std::max(coverageEdge, levelRayThinness);
+}
+
+const AuthoredLayer* MostForwardScatteringLayer(const AuthoredFog& fog)
 {
     const AuthoredLayer* halo = nullptr;
     for (int i = 0; i < fog.layerCount; ++i)
         if (!halo || fog.layers[i].g > halo->g)
             halo = &fog.layers[i];
+    return halo;
+}
+
+bool HaloHue(const AuthoredFog& fog, float* displayReferredRgb)
+{
+    const AuthoredLayer* halo = MostForwardScatteringLayer(fog);
     if (!halo)
         return false;
     const float* c = halo->diffuse;
     float peak = std::max(c[0], std::max(c[1], c[2]));
     if (peak < 1e-4f)
         return false;
-    Scale(c, 1.0f / peak, out);
+    Scale(c, 1.0f / peak, displayReferredRgb);
     return true;
 }
 }
@@ -239,7 +271,7 @@ FogParams BuildFogParams(const FrameInputs& in, const Config& cfg, const Authore
 
     float elevation = SmoothStep(-0.03f, 0.10f, in.toLight[2]);
     p.lightVisibility = elevation * (in.lightIsMoon ? kMoonLight : 1.0f);
-    p.lightAboveHorizon = SmoothStep(-kHorizonBand, kHorizonBand, in.toLight[2]);
+    p.lightAboveHorizon = SmoothStep(-kLightSettingHalfWidth, kLightSettingHalfWidth, in.toLight[2]);
     p.shadowLight = p.authored ? p.lightAboveHorizon : 1.0f;
     p.farClip = in.farClip;
     p.maxDistance = std::max(cfg.maxDistance, in.farClip);
@@ -249,29 +281,24 @@ FogParams BuildFogParams(const FrameInputs& in, const Config& cfg, const Authore
 
     float fogDistance = in.zoneFogDistance > 50.0f && in.zoneFogDistance < 20000.0f ? in.zoneFogDistance : in.fogEnd;
     fogDistance = std::clamp(fogDistance, 50.0f, 5000.0f);
-    float sun = p.lightVisibility * cfg.sunScatter;
+    float elevationFadedScatter = p.lightVisibility * cfg.sunScatter;
 
-    // Classic layers scatter the light as authored for the time of day, with no elevation fade (modern
-    // injection: diffuse * intensity * HG); only shadowed layers react to the light setting, through shadowLight.
-    // Where they are dense enough, the horizon fade alone hides the far clip, as the modern client has no other
-    // fog term within view range. The distance fog stays only where they thin out: across the coverage edge,
-    // where the derived layers take over, and where the level ray to the fog range stays thin.
+    FogLayer& distanceFog = p.layers[kDistanceFogLayer];
     if (p.authored)
     {
         AuthoredLayers(*authored, cfg, p, cfg.sunScatter, p.layers);
-        HaloColor(*authored, p.rayColor);
-        DistanceLayer(in, cfg, p, sun, fogColor, p.layers[3]);
-        const float edge = 1.0f - SmoothStep(kMinimumFogCoverage, 1.0f, authored->coverage);
-        const float thin = std::clamp(1.0f - LevelOpticalDepth(p, in.camPos[2]) / kFarOpticalDepth, 0.0f, 1.0f);
-        p.layers[3].density *= std::max(edge, thin);
+        HaloHue(*authored, p.rayColor);
+        DistanceLayer(in, cfg, p, elevationFadedScatter, fogColor, distanceFog);
+        distanceFog.density *= ClassicFogThinness(p, *authored, in.camPos[2]);
     }
     else
     {
-        DerivedLayers(in, cfg, p, sun, fogDistance, fogColor, p.layers);
-        DistanceLayer(in, cfg, p, sun, fogColor, p.layers[3]);
+        DerivedLayers(in, cfg, p, elevationFadedScatter, fogDistance, fogColor, p.layers);
+        DistanceLayer(in, cfg, p, elevationFadedScatter, fogColor, distanceFog);
     }
     return p;
 }
+
 void Mul4x4(const float* a, const float* b, float* out)
 {
     float r[16];

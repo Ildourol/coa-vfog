@@ -4,8 +4,6 @@
 #include <string>
 #include <vector>
 
-// One Classic LightDataGlobalVolumeFog layer after key interpolation and light blending.
-// Colours are 0..1 in the table's own (gamma) encoding; the rest are the table's raw values.
 struct AuthoredLayer
 {
     float diffuse[3];
@@ -26,7 +24,6 @@ struct AuthoredLayer
 };
 
 constexpr int kMaxAuthoredLayers = 3;
-// Classic fog applies where lights carrying it hold at least this much of the blend weight.
 constexpr float kMinimumFogCoverage = 0.5f;
 constexpr int kMaxBlendedLights = 4;
 
@@ -37,7 +34,6 @@ struct AuthoredFog
     int lightCount;
     uint32_t lightIds[kMaxBlendedLights];
     float lightWeights[kMaxBlendedLights];
-    // Weight of the lights that carry Classic fog, before renormalisation (0.5..1 when resolved).
     float coverage;
 };
 
@@ -47,19 +43,19 @@ public:
     bool Load(const std::string& path);
     bool Loaded() const { return !m_lights.empty(); }
 
-    // Blends the lights covering pos on the map and interpolates their keys at the day fraction.
-    // False when the map has no Classic light with fog data.
-    bool Resolve(int map, const float* pos, float dayFraction, int slot, AuthoredFog& out) const;
+    bool Resolve(int mapId, const float* position, float dayFraction, int lightParamsSlot, AuthoredFog& out) const;
 
 private:
+    static constexpr int kLightParamsSlots = 8;
+
     struct Light
     {
         uint32_t id;
-        int32_t map;
-        float pos[3];
+        int32_t mapId;
+        float position[3];
         float falloffStart;
         float falloffEnd;
-        uint32_t params[8];
+        uint32_t paramsBySlot[kLightParamsSlots];
     };
     struct Params
     {
@@ -69,15 +65,15 @@ private:
     };
     struct Key
     {
-        uint16_t time;
+        uint16_t halfMinuteOfDay;
         uint16_t layerCount;
         uint32_t firstLayer;
     };
     struct Layer
     {
-        uint32_t diffuse;
-        uint32_t emissive;
-        uint32_t shadowEmissive;
+        uint32_t diffuseRgb;
+        uint32_t emissiveRgb;
+        uint32_t shadowEmissiveRgb;
         uint32_t flags;
         float start;
         float density;
@@ -91,9 +87,14 @@ private:
         float strength;
         float exponent;
     };
+    static_assert(sizeof(Light) == 60 && sizeof(Params) == 12 && sizeof(Key) == 8 && sizeof(Layer) == 60,
+                  "records match the struct formats of tools/convert_classic_fog.py");
 
+    static bool IsMapWide(const Light& light);
+    static float SphereWeight(const Light& light, const float* position);
     const Params* FindParams(uint32_t id) const;
-    int Evaluate(const Params& params, float time, AuthoredLayer* out) const;
+    const Params* SlotParams(const Light& light, int lightParamsSlot) const;
+    int InterpolateKeys(const Params& params, float halfMinuteOfDay, AuthoredLayer* out) const;
 
     std::vector<Light> m_lights;
     std::vector<Params> m_params;
