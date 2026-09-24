@@ -10,11 +10,11 @@ using Direct3DCreate9Fn = IDirect3D9*(WINAPI*)(UINT);
 void SetRealDirect3DCreate9(Direct3DCreate9Fn fn);
 IDirect3D9* WINAPI WrappedDirect3DCreate9(UINT sdkVersion);
 
-void AllowFog(bool allowedOnNewDevices);
+void AllowFogOnNewDevices(bool allowedOnNewDevices);
 
 class FogDevice;
-FogDevice* ActiveFogDevice();
-FogDevice* FindFogDevice(void* gameDevice);
+FogDevice* LatestFogDevice();
+FogDevice* WrapperOrLatestFogDevice(void* gameDevice);
 bool IsWrapperOf(FogDevice* device, void* gameDevice);
 IDirect3DDevice9* RealDevice(FogDevice* device);
 void ForceDepthWrite(FogDevice* device, bool force);

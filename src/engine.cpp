@@ -57,8 +57,8 @@ struct OpaqueState
 {
     bool valid;
     D3DVIEWPORT9 viewport;
-    float view[16];
-    float proj[16];
+    float cameraRelativeView[16];
+    float glProjection[16];
 };
 
 OpaqueState g_opaque = {};
@@ -128,13 +128,13 @@ bool CaptureOpaqueStateUnsafe(IDirect3DDevice9* device, OpaqueState& state)
     if (FAILED(device->GetViewport(&state.viewport)))
         return false;
     ApplyPendingGxViewportDepthRange(state.viewport);
-    if (!ReadGxMatrices(state.view, state.proj))
+    if (!ReadGxMatrices(state.cameraRelativeView, state.glProjection))
     {
-        ReadFloats(kViewGlobal, state.view, 16);
-        ReadFloats(kProjectionGlobal, state.proj, 16);
+        ReadFloats(kViewGlobal, state.cameraRelativeView, 16);
+        ReadFloats(kProjectionGlobal, state.glProjection, 16);
     }
-    return state.viewport.Width > 0 && state.viewport.Height > 0 && IsPerspective(state.proj) &&
-           Finite(state.view, 16);
+    return state.viewport.Width > 0 && state.viewport.Height > 0 && IsPerspective(state.glProjection) &&
+           Finite(state.cameraRelativeView, 16);
 }
 
 void Normalize(float* v)
@@ -170,8 +170,8 @@ float GlowScreenEffectAmount()
 
 bool BuildFrameInputsUnsafe(FrameInputs& out)
 {
-    std::memcpy(out.view, g_opaque.view, sizeof(out.view));
-    std::memcpy(out.proj, g_opaque.proj, sizeof(out.proj));
+    std::memcpy(out.cameraRelativeView, g_opaque.cameraRelativeView, sizeof(out.cameraRelativeView));
+    std::memcpy(out.glProjection, g_opaque.glProjection, sizeof(out.glProjection));
     out.viewport = g_opaque.viewport;
     ReadFloats(kCameraPosition, out.camPos, 3);
     ReadFloats(kCameraTarget, out.camTarget, 3);
@@ -199,8 +199,8 @@ bool BuildFrameInputsUnsafe(FrameInputs& out)
     out.mapId = Read<int32_t>(kCurrentMap);
 
     out.zoneFogDistance = Read<float>(kZoneFogDistance);
-    out.glow = out.inLiquid ? 0.0f : GlowScreenEffectAmount();
-    out.farClip = out.proj[14] / (1.0f - out.proj[10]);
+    out.clientGlowAmount = out.inLiquid ? 0.0f : GlowScreenEffectAmount();
+    out.farClip = out.glProjection[14] / (1.0f - out.glProjection[10]);
     if (!(out.farClip > 10.0f && out.farClip < 100000.0f))
     {
         uintptr_t worldFrame = Read<uintptr_t>(kWorldFrame);

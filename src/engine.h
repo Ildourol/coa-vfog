@@ -7,8 +7,8 @@
 
 struct FrameInputs
 {
-    float view[16];
-    float proj[16];
+    float cameraRelativeView[16];
+    float glProjection[16];
     float camPos[3];
     float camTarget[3];
     D3DVIEWPORT9 viewport;
@@ -23,7 +23,7 @@ struct FrameInputs
     float fogEnd;
     float zoneFogDistance;
     float farClip;
-    float glow;
+    float clientGlowAmount;
     bool inLiquid;
     int mapId;
 };

@@ -76,6 +76,33 @@ Engine inputs (all static addresses in the 12340 image):
 | Camera in liquid | `0xCD8794` |
 | Far clip | From the projection; `[[0xB7436C] + 0xB14]` as a fallback |
 
+Engine notes behind the code:
+
+- Call sites. `0x4FB03D` calls the world render `0x4F8EA0`, a thiscall on the world frame with no stack arguments;
+  the thunk keeps ECX across the frame-begin hook. `0x4F911D` calls the opaque M2 pass `0x823CB0`, a thiscall with one
+  stack argument (`ret 4`). `0x4F9170` calls the liquid surface pass `0x77F020` (no arguments, outside liquid only).
+  `0x4F9281` calls FFX end `0x8C1010` (no arguments); the thunk renders the fog, then tail-jumps to it.
+- Depth. The world viewport's MaxZ is `[0xADEEE4]` = 0.94, passed to GxXformSetViewport at `0x4F905A` and uploaded as
+  `D3DVIEWPORT9::MaxZ` by the D3D9 backend (`0x6A9ACC`). The Gx viewport (`[[0xC5DF88] + 0xF80]`, MinZ/MaxZ) is stored
+  by `0x681890` and uploaded lazily on the next draw or clear (`0x6A99E0`), so after the opaque pass the device can
+  still hold the sky's `[0.999, 1]`; the capture reads MinZ/MaxZ from the Gx viewport, which the sky and WDL passes
+  restore (`0x7F0CB3`, `0x796466`). The WDL uses its own projection (`0x7960EB`); the sky viewport is set at
+  `0x7F0A79` and the sky writes no depth, so depth at or above max(deepest world depth, 0.99903) is sky. The engine
+  builds its projection with `0x6BF370` (OpenGL depth range, w = view z).
+- Liquid depth. While writes are forced on, the wrapper records the client's own `D3DRS_ZWRITEENABLE` requests and
+  re-applies the last one afterwards, so the client's render-state cache stays accurate.
+- Screen effects. FFX end runs the current effect `[0xD45780]` when the `ffx` CVar (`[0xD45774]`, int at `+0x30`) and
+  the effect's own CVar (`+4`) are on. The glow effect `[0xB74364]` keeps `ffxGlow` there (`0x8BFEDB`); `0x4F8770`
+  feeds it the DayNight glow (`0xD38C2C`) as the additive weight of `lerp(screen, blur, other) + g·blur²`, where
+  `other` is the drunk or underwater amount. Under liquid the wave-glow pass list is used and nothing is compensated.
+- Far clip. The clamp `0x780770` is cdecl `float(float farclip, int mapId)`, result in ST0, caller pops; it bounds
+  the value to `[0xA3E708]` (183.33) .. `[0xA3E710]` (1583.33). Its calls at `0x780810` (in the `farclip` CVar setter
+  `0x780800`, also reached from Extensions.dll on zone changes) and `0x781444` (map load `0x781430`) are rare, so the
+  hook re-reads the INI on every call.
+- Classic data. The converter keeps the `LightDataGlobalVolumeFog` rows the Classic client selects (flag bit 3,
+  ordered by layer index, at most nine per key). Classic fog applies where the lights carrying it hold at least half
+  of the blend weight; below that the derived layers take over, and the distance fog fades in across the edge.
+
 Two readings in the kit were corrected against the disassembly: the fog end is `0xD38BA8` (the kit's
 `0xD38B98` is a density-like value that Extensions.dll patches), and `0xD38C9C` is a near-constant model
 lighting direction (polar angle 110–127°), not the visible sun, so shafts use the sprite positions.

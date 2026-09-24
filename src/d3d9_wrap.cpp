@@ -775,12 +775,12 @@ IDirect3D9* WINAPI WrappedDirect3DCreate9(UINT sdkVersion)
     return new WrappedD3D9(real);
 }
 
-void AllowFog(bool allowedOnNewDevices)
+void AllowFogOnNewDevices(bool allowedOnNewDevices)
 {
     g_fogAllowedOnNewDevices = allowedOnNewDevices;
 }
 
-FogDevice* ActiveFogDevice()
+FogDevice* LatestFogDevice()
 {
     return g_latestFogDevice;
 }
@@ -790,7 +790,7 @@ bool IsWrapperOf(FogDevice* device, void* gameDevice)
     return device && static_cast<IDirect3DDevice9*>(device) == gameDevice;
 }
 
-FogDevice* FindFogDevice(void* gameDevice)
+FogDevice* WrapperOrLatestFogDevice(void* gameDevice)
 {
     FogDevice* wrapper = RegisteredWrapperOf(gameDevice);
     if (!wrapper)

@@ -451,8 +451,8 @@ struct Harness
 FrameInputs MakeInputs(const float* view, const float* proj, Vec3 eye, Vec3 at, const D3DVIEWPORT9& vp)
 {
     FrameInputs in = {};
-    std::memcpy(in.view, view, sizeof(in.view));
-    std::memcpy(in.proj, proj, sizeof(in.proj));
+    std::memcpy(in.cameraRelativeView, view, sizeof(in.cameraRelativeView));
+    std::memcpy(in.glProjection, proj, sizeof(in.glProjection));
     in.camPos[0] = eye.x;
     in.camPos[1] = eye.y;
     in.camPos[2] = eye.z;
@@ -490,14 +490,14 @@ float ReferenceUnshadowedSkyTransmittance(const FrameInputs& in, const Config& c
                                           float px, float py, int steps, float jitter)
 {
     FogParams fog = BuildFogParams(in, cfg, authored);
-    const float* P = in.proj;
+    const float* P = in.glProjection;
     const D3DVIEWPORT9& vp = in.viewport;
     float ndcX = (px - vp.X) / vp.Width * 2.0f - 1.0f;
     float ndcY = 1.0f - (py - vp.Y) / vp.Height * 2.0f;
     Vec3 ray = {(ndcX - P[8]) / P[0], (ndcY - P[9]) / P[5], 1.0f};
     float len = std::sqrt(Dot(ray, ray));
     Vec3 v = {ray.x / len, ray.y / len, ray.z / len};
-    const float* m = in.view;
+    const float* m = in.cameraRelativeView;
     Vec3 dirW = {v.x * m[0] + v.y * m[1] + v.z * m[2], v.x * m[4] + v.y * m[5] + v.z * m[6],
                  v.x * m[8] + v.y * m[9] + v.z * m[10]};
     float z = fog.maxDistance;
@@ -518,7 +518,7 @@ float ReferenceUnshadowedSkyTransmittance(const FrameInputs& in, const Config& c
         {
             float scale = std::exp(-std::fmax(dirW.z, 0.0f) * l.skyFalloff);
             float cover =
-                clamp01((t - l.start) / std::fmax(dt, 1e-3f)) * clamp01((l.limit - ta) / std::fmax(dt, 1e-3f));
+                clamp01((t - l.start) / std::fmax(dt, 1e-3f)) * clamp01((l.endDistance - ta) / std::fmax(dt, 1e-3f));
             float curve = 1.0f + l.strength * std::pow(std::fmin(std::fmax(t - l.start, 0.0f) / fog.maxDistance, 1.0f) +
                                                            1e-6f,
                                                        l.exponent);
@@ -606,21 +606,21 @@ float SunlitLevelRayOpacity(const FogParams& fog, float camZ, float distance)
         const float t = (i + 0.5f) * dt;
         for (const FogLayer& l : fog.layers)
         {
-            if (t < l.start || t > l.limit)
+            if (t < l.start || t > l.endDistance)
                 continue;
             float curve =
                 1.0f + l.strength * std::pow(std::fmin(std::fmax(t - l.start, 0.0f) / fog.maxDistance, 1.0f) + 1e-6f,
                                              l.exponent);
             float heightF = std::fmin(std::exp((l.upperHeight - camZ) * l.upperFalloff), 1.0f) *
                             std::fmin(std::exp((camZ - l.lowerHeight) * l.lowerFalloff), 1.0f);
-            float shadow = l.shadowed > 0.0f ? l.shadowDensity + (1.0f - l.shadowDensity) * fog.shadowLight : 1.0f;
+            float shadow =
+                l.shadowed > 0.0f ? l.shadowDensity + (1.0f - l.shadowDensity) * fog.shadowedLayerLightScale : 1.0f;
             tau += l.density * curve * heightF * shadow * dt;
         }
     }
     return static_cast<float>(1.0 - std::exp(-tau));
 }
 
-constexpr int kDistanceFogLayer = 3;
 constexpr float kContinentFogStart = 197.9f;
 constexpr float kContinentFarClip = 791.6f;
 constexpr Vec3 kHarbourEye = {-8576.0f, 1007.0f, 104.0f};
@@ -743,7 +743,7 @@ void CheckLinearComposite(Harness& h, const Config& cfg, Vec3 eye, Vec3 at, cons
             h.BeginFrame();
             h.DrawScene(eye, view, proj, world);
             FrameInputs in = MakeInputs(view, proj, eye, at, world);
-            in.glow = glow;
+            in.clientGlowAmount = glow;
             vf_test_render(&in, &skip);
             if (frame == kConvergenceFrames - 1)
                 img = Capture(h.dev);
@@ -1513,7 +1513,7 @@ void ReferenceUnshadowedLayerOpticalDepths(const FogParams& fog, float camZ, Vec
         for (int j = 0; j < kFogLayers; ++j)
         {
             const FogLayer& l = fog.layers[j];
-            if (t < l.start || t > l.limit)
+            if (t < l.start || t > l.endDistance)
                 continue;
             float scale = sky ? std::exp(-up * l.skyFalloff) : 1.0f;
             float curve = 1.0f + l.strength * std::pow(std::fmin(std::fmax(t - l.start, 0.0f) / fog.maxDistance, 1.0f) +
@@ -1533,9 +1533,9 @@ void PrintLayers(const FogParams& fog)
         const FogLayer& l = fog.layers[i];
         std::printf("  layer %d (%s): start %.0f density %.6f g %.2f diffuse %.2f %.2f %.2f emissive %.2f %.2f %.2f "
                     "upper %.1f/%.4f lower %.1f/%.4f shadowed %.0f limit %.0f\n",
-                    i, fog.authored && i < 3 ? "classic" : "derived", l.start, l.density, l.g, l.diffuse[0],
+                    i, fog.authored && i < kSceneLayers ? "classic" : "derived", l.start, l.density, l.g, l.diffuse[0],
                     l.diffuse[1], l.diffuse[2], l.emissive[0], l.emissive[1], l.emissive[2], l.upperHeight,
-                    l.upperFalloff, l.lowerHeight, l.lowerFalloff, l.shadowed, std::fmin(l.limit, 99999.0f));
+                    l.upperFalloff, l.lowerHeight, l.lowerFalloff, l.shadowed, std::fmin(l.endDistance, 99999.0f));
         std::printf("           curve strength %.2f exponent %.2f, sky falloff %.2f, shadow density %.2f, "
                     "shadow emissive %.2f %.2f %.2f, isotropic %.2f\n",
                     l.strength, l.exponent, l.skyFalloff, l.shadowDensity, l.shadowEmissive[0], l.shadowEmissive[1],

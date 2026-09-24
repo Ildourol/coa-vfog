@@ -22,13 +22,16 @@ struct FogLayer
     float shadowDensity;
     float shadowed;
     float skyFalloff;
-    float limit;
+    float endDistance;
     float unused;
 };
 
 static_assert(sizeof(FogLayer) == 6 * sizeof(float[4]), "FogLayer uploads as a march layer's six float4 registers");
 
 constexpr int kFogLayers = 4;
+constexpr int kSceneLayers = 3;
+constexpr int kDistanceFogLayer = kSceneLayers;
+static_assert(kDistanceFogLayer + 1 == kFogLayers, "the distance fog follows the scene layers");
 
 struct FogParams
 {
@@ -37,7 +40,7 @@ struct FogParams
     float rayColor[3];
     float lightVisibility;
     float lightAboveHorizon;
-    float shadowLight;
+    float shadowedLayerLightScale;
     float maxDistance;
     float horizonStart;
     float farClip;

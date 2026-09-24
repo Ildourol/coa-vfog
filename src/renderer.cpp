@@ -124,7 +124,7 @@ RECT ViewportRect(const D3DVIEWPORT9& vp)
 
 bool WorldViewFromCameraRelative(const FrameInputs& in, float* viewToWorld, float* worldToView)
 {
-    if (!Invert4x4(in.view, viewToWorld))
+    if (!Invert4x4(in.cameraRelativeView, viewToWorld))
         return false;
     viewToWorld[12] = in.camPos[0];
     viewToWorld[13] = in.camPos[1];
@@ -562,11 +562,11 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
         cfg.dataMode == 1 && GlobalFogData().Resolve(in.mapId, in.camPos, in.dayFraction, 0, authored);
     const FogParams fog = BuildFogParams(in, cfg, hasAuthored ? &authored : nullptr);
     LogLightChange(in, authored, hasAuthored);
-    const float* proj = in.proj;
+    const float* proj = in.glProjection;
     const WorldDepthMapping worldDepth = MapWorldDepth(proj, vp);
 
     float toLightInView[3];
-    TransformDirection(in.toLight, in.view, toLightInView);
+    TransformDirection(in.toLight, in.cameraRelativeView, toLightInView);
     Normalize3(toLightInView);
 
     float common[9][4] = {
@@ -638,16 +638,16 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
         VF_LOG_INFO("  map %d fog %08X start %.1f end %.1f zone %.1f sun %08X direct %08X ambient %08X refZ %.1f "
                     "glow %.2f",
                     in.mapId, in.fogColor, in.fogStart, in.fogEnd, in.zoneFogDistance, in.sunColor, in.directColor,
-                    in.ambientColor, fog.referenceZ, in.glow);
+                    in.ambientColor, fog.referenceZ, in.clientGlowAmount);
         for (int i = 0; i < kFogLayers; ++i)
         {
             const FogLayer& l = fog.layers[i];
             VF_LOG_INFO("  layer %d (%s): start %.0f density %.6f curve %.2f^%.2f g %.2f diffuse %.2f %.2f %.2f "
                         "emissive %.2f %.2f %.2f upper %.1f/%.4f lower %.1f/%.4f shadowed %.0f limit %.0f",
-                        i, fog.authored && i < 3 ? "classic" : "derived", l.start, l.density, l.strength, l.exponent,
-                        l.g, l.diffuse[0], l.diffuse[1], l.diffuse[2], l.emissive[0], l.emissive[1], l.emissive[2],
-                        l.upperHeight, l.upperFalloff, l.lowerHeight, l.lowerFalloff, l.shadowed,
-                        std::min(l.limit, 99999.0f));
+                        i, fog.authored && i < kSceneLayers ? "classic" : "derived", l.start, l.density, l.strength,
+                        l.exponent, l.g, l.diffuse[0], l.diffuse[1], l.diffuse[2], l.emissive[0], l.emissive[1],
+                        l.emissive[2], l.upperHeight, l.upperFalloff, l.lowerHeight, l.lowerFalloff, l.shadowed,
+                        std::min(l.endDistance, 99999.0f));
         }
     }
 
@@ -674,7 +674,7 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
     SetTarget(dev, m_marchTarget);
     dev->SetPixelShader(m_march[std::clamp(cfg.quality, 1, 3) - 1]);
     const Float4 march[3] = {
-        {toLightInView[0], toLightInView[1], toLightInView[2], fog.shadowLight},
+        {toLightInView[0], toLightInView[1], toLightInView[2], fog.shadowedLayerLightScale},
         {kShadowMinStep, kShadowStepPerYard,
          cfg.lightShafts && (fog.authored ? fog.lightAboveHorizon : fog.lightVisibility) > 0.001f ? 1.0f : 0.0f,
          kShadowThicknessSteps},
@@ -765,7 +765,7 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
          static_cast<float>(cfg.debugView), blendMode},
         {fog.rayColor[0], fog.rayColor[1], fog.rayColor[2], 0.0f},
         {sunPx[0], sunPx[1], cfg.sunMarker && sunInFront ? 1.0f : 0.0f,
-         cfg.glowCompensation && sceneBlend ? in.glow : 0.0f},
+         cfg.glowCompensation && sceneBlend ? in.clientGlowAmount : 0.0f},
     };
     dev->SetPixelShaderConstantF(9, &composite[0].x, 3);
     BindTexture(dev, 0, depthTexture, false);
@@ -782,7 +782,7 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
     }
 
     std::memcpy(m_prevWorldToView, worldToView, sizeof(m_prevWorldToView));
-    std::memcpy(m_prevProj, in.proj, sizeof(m_prevProj));
+    std::memcpy(m_prevProj, in.glProjection, sizeof(m_prevProj));
     std::memcpy(m_prevCam, in.camPos, sizeof(m_prevCam));
     m_prevViewport = vp;
     m_prevScale = scale;

@@ -44,7 +44,7 @@ void Attach(HMODULE module)
         VF_LOG_INFO("EngineHooks=0; the client runs unmodified");
         return;
     }
-    AllowFog(InstallEngineHooks());
+    AllowFogOnNewDevices(InstallEngineHooks());
     InstallFarClipHooks();
 }
 }
@@ -67,7 +67,7 @@ extern "C" int __cdecl vf_loader_anchor()
 extern "C" IDirect3D9* __cdecl vf_test_wrap_direct3d9(Direct3DCreate9Fn realCreate, UINT sdkVersion)
 {
     SetRealDirect3DCreate9(realCreate);
-    AllowFog(true);
+    AllowFogOnNewDevices(true);
     return WrappedDirect3DCreate9(sdkVersion);
 }
 
@@ -78,10 +78,10 @@ extern "C" void __cdecl vf_test_set_config(const Config* cfg)
 
 extern "C" void __cdecl vf_test_force_depth_write(int force)
 {
-    ForceDepthWrite(ActiveFogDevice(), force != 0);
+    ForceDepthWrite(LatestFogDevice(), force != 0);
 }
 
 extern "C" int __cdecl vf_test_render(const FrameInputs* in, const char** skipReason)
 {
-    return RenderFog(ActiveFogDevice(), *in, GlobalConfig().Get(), skipReason) ? 1 : 0;
+    return RenderFog(LatestFogDevice(), *in, GlobalConfig().Get(), skipReason) ? 1 : 0;
 }

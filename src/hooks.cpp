@@ -62,7 +62,7 @@ FARPROC WINAPI GetProcAddressFilter(HMODULE module, LPCSTR name)
 FogDevice* GameFogDevice()
 {
     void* game = engine::GameD3DDevice();
-    FogDevice* device = FindFogDevice(game);
+    FogDevice* device = WrapperOrLatestFogDevice(game);
     if (!g_deviceChecked && device)
     {
         g_deviceChecked = true;
@@ -443,7 +443,7 @@ bool InstallEngineHooks()
 
 void InstallFarClipHooks()
 {
-    if (GlobalConfig().Get().farClipMax <= 0.0f)
+    if (GlobalConfig().Get().farClipMax <= kFarClipMaxKeepsClientCap)
     {
         VF_LOG_INFO("far clip hooks not installed (FarClipMax=0)");
         return;
