@@ -209,13 +209,14 @@ float4 main(float2 lowResTexel : VPOS) : COLOR0
     float upward = max(directionWorld.z, 0);
     float riseLevelledAtHorizon = lerp(directionWorld.z, upward, horizonBlend);
 
+    FogLayer layers[kFogLayers];
     float phase[kFogLayers];
     float skyDensityScale[kFogLayers];
     [unroll] for (int i = 0; i < kFogLayers; i++)
     {
-        FogLayer layer = LoadFogLayer(i);
-        phase[i] = lerp(PhaseHG(layer.g, cosToLight), 1, layer.isotropic);
-        skyDensityScale[i] = skyMask > 0 ? exp(-upward * layer.skyFalloff) : 1;
+        layers[i] = LoadFogLayer(i);
+        phase[i] = lerp(PhaseHG(layers[i].g, cosToLight), 1, layers[i].isotropic);
+        skyDensityScale[i] = skyMask > 0 ? exp(-upward * layers[i].skyFalloff) : 1;
     }
 
     float3 inScatteredRadiance = 0;
@@ -236,7 +237,7 @@ float4 main(float2 lowResTexel : VPOS) : COLOR0
         float3 stepRadiance = 0;
         float stepOpticalDepth = 0;
         [unroll] for (int j = 0; j < kFogLayers; j++)
-            AccumulateLayer(LoadFogLayer(j), phase[j], skyDensityScale[j], stepStart, sampleDistance, stepLength,
+            AccumulateLayer(layers[j], phase[j], skyDensityScale[j], stepStart, sampleDistance, stepLength,
                             sampleHeight, sunVisibility, stepRadiance, stepOpticalDepth);
         [branch] if (stepOpticalDepth > 1e-6)
         {
@@ -244,6 +245,8 @@ float4 main(float2 lowResTexel : VPOS) : COLOR0
             inScatteredRadiance += transmittance * stepRadiance * ((1 - stepTransmittance) / stepOpticalDepth);
             transmittance *= stepTransmittance;
         }
+        [branch] if (transmittance < 0.005)
+            break;
     }
     return float4(inScatteredRadiance, 1 - transmittance);
 }

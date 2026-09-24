@@ -402,11 +402,9 @@ bool Renderer::CopyWorldViewport(IDirect3DDevice9* dev, IDirect3DSurface9* targe
 
 bool Renderer::DepthProbeDue(long long now) const
 {
-    const bool debugLog = LogEnabled(LogLevel::Debug);
-    const float probeIntervalSeconds = debugLog ? kProbeDebugSeconds : kProbeSeconds;
-    return LogEnabled(LogLevel::Info) && !m_probeFailed && m_frame >= kProbeFirstFrame &&
-           (debugLog || m_probeAttempts < kInfoLevelGpuStallingProbeLimit) &&
-           (m_probeAttempts == 0 || TickSeconds(now - m_probeTicks) > probeIntervalSeconds);
+    if (!LogEnabled(LogLevel::Debug) || m_probeFailed || m_frame < kProbeFirstFrame)
+        return false;
+    return m_probeAttempts == 0 || TickSeconds(now - m_probeTicks) > kProbeDebugSeconds;
 }
 
 void Renderer::LogDepthProbe(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DTexture9* fog,

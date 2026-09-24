@@ -21,11 +21,10 @@ void CurrentNeighbourhoodRange(float2 uv, float4 centre, out float4 lowest, out 
 {
     lowest = centre;
     highest = centre;
-    static const float2 kNeighbourOffsets[8] = {
-        float2(-1, -1), float2(0, -1), float2(1, -1), float2(-1, 0),
-        float2(1, 0), float2(-1, 1), float2(0, 1), float2(1, 1)
+    static const float2 kNeighbourOffsets[4] = {
+        float2(0, -1), float2(-1, 0), float2(1, 0), float2(0, 1)
     };
-    [unroll] for (int k = 0; k < 8; k++)
+    [unroll] for (int k = 0; k < 4; k++)
     {
         float4 neighbour = tex2Dlod(sCurrent, float4(uv + kNeighbourOffsets[k] * LowResTexelSize(), 0, 0));
         lowest = min(lowest, neighbour);

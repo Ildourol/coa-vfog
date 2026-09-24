@@ -144,8 +144,13 @@ float4 PremultipliedForFixedFunctionBlend(float4 fog, float3 godRays, bool linea
 float4 main(float2 pixelIndex : VPOS) : COLOR0
 {
     float2 pixel = pixelIndex + 0.5;
-    float viewZ = LinearDepth(SampleDepth(sDepth, pixel));
-    float4 fog = DepthAwareUpsample(pixel, viewZ);
+    float depth = SampleDepth(sDepth, pixel);
+    float viewZ = LinearDepth(depth);
+    float4 fog;
+    [branch] if (BeyondFarClip(depth))
+        fog = tex2Dlod(sFog, float4(LowResTexelToUv(FullPixelToLowResTexel(pixel)), 0, 0));
+    else
+        fog = DepthAwareUpsample(pixel, viewZ);
     fog.rgb *= Exposure();
 
     float2 viewportUv = (pixel - ViewportOrigin()) / ViewportSize();
