@@ -1,87 +1,170 @@
-// Depth-aware upsample of the low-res fog onto the world viewport.
-//
-// Linear mode (cComposite.w = 1): the fog is blended over a copy of the scene in linear light,
-// scene * T + L, the way the modern client adds its premultiplied volume to a linear frame. Highlights
-// above a knee roll off per channel, so saturated sunset colours clip toward yellow like the modern frame.
-// Fallback (w = 2, linear fog without a scene copy) and gamma mode (w = 0) use the fixed-function blend
-// ONE, INVSRCALPHA.
 #include "vf_common.hlsli"
 
-float4 cComposite : register(c9);   // x = exposure, y = god-ray strength, z = debug view, w = blend mode (above)
-float4 cRayColor  : register(c10);  // rgb = god-ray colour
-float4 cSunPx     : register(c11);  // xy = sun position in render-target pixels, z = sun marker enabled,
-                                    // w = the client's glow amount to compensate (0 = none)
+float4 cComposite : register(c9);
+float4 cGodRayColour : register(c10);
+float4 cSun : register(c11);
 
 sampler2D sDepth : register(s0);
-sampler2D sFog   : register(s1);
-sampler2D sRays  : register(s2);
-sampler2D sScene : register(s3);    // the world viewport before the fog (linear mode)
+sampler2D sFog : register(s1);
+sampler2D sGodRays : register(s2);
+sampler2D sSceneBeforeFog : register(s3);
 
-static const float kKnee = 0.8;
+static const float kHighlightKnee = 0.8;
+static const float kSunMarkerRadius = 6;
+static const float4 kSunMarkerColour = float4(1, 0, 0, 1);
+static const float kDebugRadiance = 1;
+static const float kDebugTransmittance = 2;
+static const float kDebugLinearDepth = 3;
 
-float3 RollOff(float3 x, float3 knee)
+float Exposure()
 {
-    float3 span = max(1 - knee, 1e-4);
-    return x <= knee ? x : knee + span * (1 - exp(-(x - knee) / span));
+    return cComposite.x;
 }
 
-float4 main(float2 vpos : VPOS) : COLOR0
+float GodRayStrength()
 {
-    float2 pc = vpos + 0.5;
-    float z0 = LinearDepth(SampleDepth(sDepth, pc));
-    float2 lowc = FullToLow(pc);
-    float2 base = floor(lowc);
-    float2 f = lowc - base;
+    return cComposite.y;
+}
 
-    static const float2 kTaps[4] = { float2(0, 0), float2(1, 0), float2(0, 1), float2(1, 1) };
-    float4 acc = 0;
-    float wsum = 0;
+float DebugView()
+{
+    return cComposite.z;
+}
+
+bool DebugViewEnabled()
+{
+    return DebugView() > 0.5;
+}
+
+bool DebugViewAtMost(float view)
+{
+    return DebugView() < view + 0.5;
+}
+
+float BlendMode()
+{
+    return cComposite.w;
+}
+
+bool BlendsInLinearLight()
+{
+    return BlendMode() > 0.5;
+}
+
+bool BlendsOverSceneCopy()
+{
+    return BlendMode() > 0.5 && BlendMode() < 1.5;
+}
+
+float2 SunPixel()
+{
+    return cSun.xy;
+}
+
+bool SunMarkerEnabled()
+{
+    return cSun.z > 0;
+}
+
+float ClientGlowToCompensate()
+{
+    return cSun.w;
+}
+
+float3 GammaToLinear(float3 colour)
+{
+    return pow(colour, 2.2);
+}
+
+float3 LinearToGamma(float3 colour)
+{
+    return pow(colour, 1 / 2.2);
+}
+
+float3 RollOffHighlights(float3 colour, float3 knee)
+{
+    float3 span = max(1 - knee, 1e-4);
+    return colour <= knee ? colour : knee + span * (1 - exp(-(colour - knee) / span));
+}
+
+float3 BeforeClientGlow(float3 onScreen, float glow)
+{
+    return (sqrt(1 + 4 * glow * onScreen) - 1) / (2 * glow);
+}
+
+float4 DepthAwareUpsample(float2 pixel, float viewZ)
+{
+    float2 lowResCoord = FullPixelToLowResTexel(pixel);
+    float2 baseTexel = floor(lowResCoord);
+    float2 bilinearFraction = lowResCoord - baseTexel;
+
+    static const float2 kTapOffsets[4] = { float2(0, 0), float2(1, 0), float2(0, 1), float2(1, 1) };
+    float4 weightedFog = 0;
+    float weightSum = 0;
     [unroll] for (int j = 0; j < 4; j++)
     {
-        float2 o = kTaps[j];
-        float2 t = clamp(base + o, 0, cLowSize.xy - 1);
-        float zt = LinearDepth(SampleDepth(sDepth, LowToFull(t)));
-        float2 bw2 = lerp(1 - f, f, o);
-        float w = bw2.x * bw2.y / (1e-3 + abs(zt - z0) / max(z0, 1e-3)) + 1e-6;
-        acc += tex2Dlod(sFog, float4((t + 0.5) * cLowSize.zw, 0, 0)) * w;
-        wsum += w;
+        float2 tapOffset = kTapOffsets[j];
+        float2 tapTexel = clamp(baseTexel + tapOffset, 0, LowResSize() - 1);
+        float tapViewZ = LinearDepth(SampleDepth(sDepth, LowResTexelToFullPixel(tapTexel)));
+        float2 bilinearWeight = lerp(1 - bilinearFraction, bilinearFraction, tapOffset);
+        float relativeDepthDifference = abs(tapViewZ - viewZ) / max(viewZ, 1e-3);
+        float weight = bilinearWeight.x * bilinearWeight.y / (1e-3 + relativeDepthDifference) + 1e-6;
+        weightedFog += tex2Dlod(sFog, float4(LowResTexelToUv(tapTexel), 0, 0)) * weight;
+        weightSum += weight;
     }
-    float4 fog = acc / wsum;
-    fog.rgb *= cComposite.x;
+    return weightedFog / weightSum;
+}
 
-    // God rays are a display-space overlay on top of the fogged image (their source is the gamma frame).
-    float2 uv = (pc - cRect.xy) / cRect.zw;
-    float3 rays = 0;
-    [branch] if (cComposite.y > 0)
-        rays = tex2Dlod(sRays, float4(uv, 0, 0)).rgb * cRayColor.rgb * cComposite.y;
-    const bool linearLight = cComposite.w > 0.5;
+float3 DisplaySpaceGodRays(float2 viewportUv)
+{
+    float3 godRays = 0;
+    [branch] if (GodRayStrength() > 0)
+        godRays = tex2Dlod(sGodRays, float4(viewportUv, 0, 0)).rgb * cGodRayColour.rgb * GodRayStrength();
+    return godRays;
+}
 
-    [branch] if (cComposite.z > 0.5)
-    {
-        if (cComposite.z < 1.5)
-            return float4((linearLight ? pow(saturate(fog.rgb), 1 / 2.2) : fog.rgb) + rays, 1);
-        if (cComposite.z < 2.5)
-            return float4((1 - fog.aaa), 1);
-        if (cComposite.z < 3.5)
-            return float4(saturate(z0 / cDepthLin.z).xxx, 1);
-    }
-    [branch] if (cSunPx.z > 0 && distance(pc, cSunPx.xy) < 6)
-        return float4(1, 0, 0, 1);
+float4 BlendOverSceneCopy(float2 viewportUv, float4 fog, float3 godRays)
+{
+    float3 scene = GammaToLinear(tex2Dlod(sSceneBeforeFog, float4(viewportUv, 0, 0)).rgb);
+    float3 colour = LinearToGamma(RollOffHighlights(scene * (1 - fog.a) + fog.rgb, max(kHighlightKnee, scene)));
+    [branch] if (ClientGlowToCompensate() > 0)
+        colour = lerp(colour, BeforeClientGlow(colour, ClientGlowToCompensate()), fog.a);
+    return float4(colour + godRays, 1);
+}
 
-    [branch] if (cComposite.w > 0.5 && cComposite.w < 1.5)
-    {
-        float3 scene = pow(tex2Dlod(sScene, float4(uv, 0, 0)).rgb, 2.2);
-        float3 c = pow(RollOff(scene * (1 - fog.a) + fog.rgb, max(kKnee, scene)), 1 / 2.2);
-        // The client's glow runs after the fog and adds g * blur^2, which bleaches bright fog to white. On fogged
-        // pixels, solve c' + g c'^2 = c so the fog lands on screen as composited.
-        [branch] if (cSunPx.w > 0)
-            c = lerp(c, (sqrt(1 + 4 * cSunPx.w * c) - 1) / (2 * cSunPx.w), fog.a);
-        return float4(c + rays, 1);
-    }
-    // Fixed-function blend: premultiplied fog, rolled off per channel like the linear path.
-    float a = max(fog.a, 1e-4);
-    float3 unit = RollOff(fog.rgb / a, kKnee);
+float4 PremultipliedForFixedFunctionBlend(float4 fog, float3 godRays, bool linearLight)
+{
+    float opacity = max(fog.a, 1e-4);
+    float3 unpremultiplied = RollOffHighlights(fog.rgb / opacity, kHighlightKnee);
     if (linearLight)
-        unit = pow(unit, 1 / 2.2);
-    return float4(unit * fog.a + rays, fog.a);
+        unpremultiplied = LinearToGamma(unpremultiplied);
+    return float4(unpremultiplied * fog.a + godRays, fog.a);
+}
+
+float4 main(float2 pixelIndex : VPOS) : COLOR0
+{
+    float2 pixel = pixelIndex + 0.5;
+    float viewZ = LinearDepth(SampleDepth(sDepth, pixel));
+    float4 fog = DepthAwareUpsample(pixel, viewZ);
+    fog.rgb *= Exposure();
+
+    float2 viewportUv = (pixel - ViewportOrigin()) / ViewportSize();
+    float3 godRays = DisplaySpaceGodRays(viewportUv);
+    const bool linearLight = BlendsInLinearLight();
+
+    [branch] if (DebugViewEnabled())
+    {
+        if (DebugViewAtMost(kDebugRadiance))
+            return float4((linearLight ? LinearToGamma(saturate(fog.rgb)) : fog.rgb) + godRays, 1);
+        if (DebugViewAtMost(kDebugTransmittance))
+            return float4(1 - fog.aaa, 1);
+        if (DebugViewAtMost(kDebugLinearDepth))
+            return float4(saturate(viewZ / MaxFogDistance()).xxx, 1);
+    }
+    [branch] if (SunMarkerEnabled() && distance(pixel, SunPixel()) < kSunMarkerRadius)
+        return kSunMarkerColour;
+
+    [branch] if (BlendsOverSceneCopy())
+        return BlendOverSceneCopy(viewportUv, fog, godRays);
+    return PremultipliedForFixedFunctionBlend(fog, godRays, linearLight);
 }

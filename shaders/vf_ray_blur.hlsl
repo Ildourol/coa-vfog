@@ -1,19 +1,41 @@
-// One radial blur pass toward the sun.
-float4 cRayBlur : register(c9);   // xy = sun position in uv, z = step fraction, w = normalisation
-float4 cRayTex  : register(c10);  // zw = 1 / target size
+float4 cRadialBlur : register(c9);
+float4 cRayTarget : register(c10);
 
 sampler2D sSource : register(s0);
 
-float4 main(float2 vpos : VPOS) : COLOR0
+static const int kTaps = 8;
+static const float kDecayPerTap = 0.9;
+
+float2 SunUv()
 {
-    float2 uv = (vpos + 0.5) * cRayTex.zw;
-    float2 d = (cRayBlur.xy - uv) * cRayBlur.z;
+    return cRadialBlur.xy;
+}
+
+float StepFractionTowardSun()
+{
+    return cRadialBlur.z;
+}
+
+float TapWeightNormalisation()
+{
+    return cRadialBlur.w;
+}
+
+float2 TargetTexelSize()
+{
+    return cRayTarget.zw;
+}
+
+float4 main(float2 texel : VPOS) : COLOR0
+{
+    float2 uv = (texel + 0.5) * TargetTexelSize();
+    float2 tapStep = (SunUv() - uv) * StepFractionTowardSun();
     float3 sum = 0;
-    float decay = 1;
-    [unroll] for (int k = 0; k < 8; k++)
+    float tapWeight = 1;
+    [unroll] for (int k = 0; k < kTaps; k++)
     {
-        sum += tex2Dlod(sSource, float4(uv + d * k, 0, 0)).rgb * decay;
-        decay *= 0.9;
+        sum += tex2Dlod(sSource, float4(uv + tapStep * k, 0, 0)).rgb * tapWeight;
+        tapWeight *= kDecayPerTap;
     }
-    return float4(sum * cRayBlur.w, 1);
+    return float4(sum * TapWeightNormalisation(), 1);
 }

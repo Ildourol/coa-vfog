@@ -1,16 +1,31 @@
-// Diagnostic readback, one texel per point of a 5x5 grid over the world viewport:
-// raw depth, linear depth, fog opacity, class (0 world, 1 beyond the far clip, 2 sky).
 #include "vf_common.hlsli"
 
 sampler2D sDepth : register(s0);
-sampler2D sFog   : register(s1);
+sampler2D sFog : register(s1);
 
-float4 main(float2 vpos : VPOS) : COLOR0
+static const float kGridSide = 5;
+static const float kGridCellFraction = 0.2;
+static const float kGridCellCentreFraction = 0.1;
+static const float kClassWorld = 0;
+static const float kClassBeyondFarClip = 1;
+static const float kClassSky = 2;
+
+float2 GridPoint(float probeIndex)
 {
-    float i = floor(vpos.x);
-    float2 grid = float2(fmod(i, 5), floor(i / 5));
-    float2 px = floor(cRect.xy + (grid * 0.2 + 0.1) * cRect.zw) + 0.5;
-    float d = SampleDepth(sDepth, px);
-    float4 fog = tex2Dlod(sFog, float4((FullToLow(px) + 0.5) * cLowSize.zw, 0, 0));
-    return float4(d, LinearDepth(d), fog.a, IsSky(d) ? 2 : (BeyondWorld(d) ? 1 : 0));
+    return float2(fmod(probeIndex, kGridSide), floor(probeIndex / kGridSide));
+}
+
+float DepthClass(float depth)
+{
+    return IsSky(depth) ? kClassSky : (BeyondFarClip(depth) ? kClassBeyondFarClip : kClassWorld);
+}
+
+float4 main(float2 probeTexel : VPOS) : COLOR0
+{
+    float2 gridPoint = GridPoint(floor(probeTexel.x));
+    float2 cellCentre = ViewportOrigin() + (gridPoint * kGridCellFraction + kGridCellCentreFraction) * ViewportSize();
+    float2 pixel = floor(cellCentre) + 0.5;
+    float depth = SampleDepth(sDepth, pixel);
+    float4 fog = tex2Dlod(sFog, float4(LowResTexelToUv(FullPixelToLowResTexel(pixel)), 0, 0));
+    return float4(depth, LinearDepth(depth), fog.a, DepthClass(depth));
 }

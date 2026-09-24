@@ -1,135 +1,249 @@
-// Low-resolution ray march through the fog layers with screen-space sun visibility.
-// Output: rgb = in-scattered radiance, a = 1 - transmittance.
 #include "vf_common.hlsli"
 
 #ifndef STEPS
 #define STEPS 24
 #endif
-#define SHADOW_STEPS 6
-#define LAYER_REGS 6
 
-float4 cToLight  : register(c9);   // xyz toward-light direction (view space), w = light above the horizon
-float4 cShadow   : register(c10);  // x = min step (yd), y = step per yard of distance, z = enabled, w = thickness in steps
-float4 cMarch    : register(c11);  // x = jitter, y = distance-curve range, z = horizon blend start, w = far clip
-float4 cLayer[24] : register(c12); // four layers of six float4, see FogLayer in fog_model.h
+static const int kShadowSteps = 6;
+static const int kFogLayers = 4;
+static const int kRegistersPerLayer = 6;
+static const float kShadowMinViewZ = 0.3;
+static const float kShadowDepthBias = 0.3;
+static const float kGoldenRatioFraction = 0.618034;
+
+float4 cLight : register(c9);
+float4 cShadowMarch : register(c10);
+float4 cMarch : register(c11);
+float4 cLayers[kFogLayers * kRegistersPerLayer] : register(c12);
 
 sampler2D sDepth : register(s0);
 
-float PhaseHG(float g, float c)
+struct FogLayer
 {
-    float r = (1 - g) / sqrt(max(1 + g * g - 2 * g * c, 1e-6));
+    float start;
+    float density;
+    float g;
+    float isotropic;
+    float3 emissive;
+    float strength;
+    float3 diffuse;
+    float exponent;
+    float upperHeight;
+    float upperFalloff;
+    float lowerHeight;
+    float lowerFalloff;
+    float3 shadowEmissive;
+    float shadowDensity;
+    float shadowed;
+    float skyFalloff;
+    float limit;
+};
+
+FogLayer LoadFogLayer(int index)
+{
+    int first = index * kRegistersPerLayer;
+    FogLayer layer;
+    layer.start = cLayers[first].x;
+    layer.density = cLayers[first].y;
+    layer.g = cLayers[first].z;
+    layer.isotropic = cLayers[first].w;
+    layer.emissive = cLayers[first + 1].rgb;
+    layer.strength = cLayers[first + 1].w;
+    layer.diffuse = cLayers[first + 2].rgb;
+    layer.exponent = cLayers[first + 2].w;
+    layer.upperHeight = cLayers[first + 3].x;
+    layer.upperFalloff = cLayers[first + 3].y;
+    layer.lowerHeight = cLayers[first + 3].z;
+    layer.lowerFalloff = cLayers[first + 3].w;
+    layer.shadowEmissive = cLayers[first + 4].rgb;
+    layer.shadowDensity = cLayers[first + 4].w;
+    layer.shadowed = cLayers[first + 5].x;
+    layer.skyFalloff = cLayers[first + 5].y;
+    layer.limit = cLayers[first + 5].z;
+    return layer;
+}
+
+float3 DirectionToLightView()
+{
+    return cLight.xyz;
+}
+
+float LightAboveHorizon()
+{
+    return cLight.w;
+}
+
+float ShadowMinStep()
+{
+    return cShadowMarch.x;
+}
+
+float ShadowStepPerYard()
+{
+    return cShadowMarch.y;
+}
+
+bool ShadowsEnabled()
+{
+    return cShadowMarch.z > 0;
+}
+
+float ShadowThicknessInSteps()
+{
+    return cShadowMarch.w;
+}
+
+bool JitterEnabled()
+{
+    return cMarch.x > 0;
+}
+
+float DistanceCurveRange()
+{
+    return cMarch.y;
+}
+
+float HorizonBlendStart()
+{
+    return cMarch.z;
+}
+
+float FarClip()
+{
+    return cMarch.w;
+}
+
+float PhaseHG(float g, float cosAngle)
+{
+    float r = (1 - g) / sqrt(max(1 + g * g - 2 * g * cosAngle, 1e-6));
     return r * r * r;
 }
 
-float SunVisibility(float3 p, float t, float jitter)
+bool SceneOccludes(float sceneDepth, float sampleViewZ, float occluderThickness)
 {
-    float stepLen = max(cShadow.x, t * cShadow.y);
-    float thickness = stepLen * cShadow.w;
-    float3 stepV = cToLight.xyz * stepLen;
-    float3 q = p + stepV * jitter;
-    float vis = 1;
-    [loop] for (int k = 0; k < SHADOW_STEPS; k++)
+    float sceneViewZ = LinearDepth(sceneDepth);
+    return !BeyondFarClip(sceneDepth) && sceneViewZ < sampleViewZ - kShadowDepthBias &&
+           sceneViewZ > sampleViewZ - occluderThickness;
+}
+
+float ScreenSpaceSunVisibility(float3 viewPosition, float sampleDistance, float jitter)
+{
+    float stepLength = max(ShadowMinStep(), sampleDistance * ShadowStepPerYard());
+    float occluderThickness = stepLength * ShadowThicknessInSteps();
+    float3 stepToLight = DirectionToLightView() * stepLength;
+    float3 samplePosition = viewPosition + stepToLight * jitter;
+    float visibility = 1;
+    [loop] for (int k = 0; k < kShadowSteps; k++)
     {
-        q += stepV;
-        [branch] if (q.z < 0.3)
+        samplePosition += stepToLight;
+        [branch] if (samplePosition.z < kShadowMinViewZ)
             break;
-        float2 px = ViewToPixel(q);
-        [branch] if (any(px < cRect.xy) || any(px > cRect.xy + cRect.zw))
+        float2 pixel = ViewToPixel(samplePosition);
+        [branch] if (OutsideViewport(pixel))
             break;
-        // Distant terrain and sky decode to the fog range and never occlude.
-        float ds = SampleDepth(sDepth, px);
-        float sz = LinearDepth(ds);
-        [branch] if (!BeyondWorld(ds) && sz < q.z - 0.3 && sz > q.z - thickness)
+        [branch] if (SceneOccludes(SampleDepth(sDepth, pixel), samplePosition.z, occluderThickness))
         {
-            vis = 0;
+            visibility = 0;
             break;
         }
     }
-    return vis;
+    return visibility;
 }
 
-// Layer registers: L0 (start, density, g, isotropic), L1 (emissive, strength), L2 (diffuse, exponent),
-// L3 (upper height, upper falloff, lower height, lower falloff), L4 (shadow emissive, shadow density),
-// L5 (shadowed, sky falloff, limit, -).
-void AccumulateLayer(int b, float phase, float scale, float ta, float t, float dt, float h, float vis,
-                     inout float3 src, inout float tau)
+float StepCoverage(FogLayer layer, float stepStart, float sampleDistance, float stepLength)
 {
-    float4 l0 = cLayer[b];
-    float4 l1 = cLayer[b + 1];
-    float4 l2 = cLayer[b + 2];
-    float4 l3 = cLayer[b + 3];
-    float4 l4 = cLayer[b + 4];
-    float4 l5 = cLayer[b + 5];
-    float cover = saturate((t - l0.x) / max(dt, 1e-3)) * saturate((l5.z - ta) / max(dt, 1e-3));
-    float curve = 1 + l1.w * pow(saturate(max(t - l0.x, 0) / cMarch.y) + 1e-6, l2.w);
-    float heightF = saturate(exp((l3.x - h) * l3.y)) * saturate(exp((h - l3.z) * l3.w));
-    float shadowed = l5.x;
-    float lit = lerp(1, vis, shadowed);
-    float e = l0.y * scale * dt * cover * curve * heightF * lerp(1, lerp(l4.w, 1, vis), shadowed);
-    float3 emissive = lerp(l1.rgb, lerp(l4.rgb, l1.rgb, vis), shadowed);
-    src += (l2.rgb * (lit * phase) + emissive) * e;
-    tau += e;
+    return saturate((sampleDistance - layer.start) / max(stepLength, 1e-3)) *
+           saturate((layer.limit - stepStart) / max(stepLength, 1e-3));
 }
 
-float4 main(float2 vpos : VPOS) : COLOR0
+float DistanceCurve(FogLayer layer, float sampleDistance)
 {
-    float2 pc = LowToFull(vpos);
-    float3 ray = ViewRay(pc);
-    float rayLen = length(ray);
-    float3 V = ray / rayLen;
-    float d = SampleDepth(sDepth, pc);
-    float sky = IsSky(d) ? 1 : 0;
-    float z = LinearDepth(d);
-    float horizon = max(BeyondWorld(d) ? 1 : 0, smoothstep(cMarch.z, cMarch.w, z));
-    z = lerp(z, cDepthLin.z, horizon);
-    float tMax = min(z * rayLen, cDepthLin.z);
+    return 1 + layer.strength * pow(saturate(max(sampleDistance - layer.start, 0) / DistanceCurveRange()) + 1e-6,
+                                    layer.exponent);
+}
 
-    float jitter = cMarch.x > 0 ? frac(InterleavedGradientNoise(vpos) + cLow.y * 0.618034) : 0.5;
-    float3 camW = cInvView[3].xyz;
-    float3 dirW = mul(V, (float3x3)cInvView);
-    float cosT = dot(cToLight.xyz, V);
-    float up = max(dirW.z, 0);
-    // Pixels beyond the far clip (distant terrain, or sky below the horizon) and geometry fading into the
-    // horizon are marched as level rays, so they meet the sky at eye level seamlessly.
-    float dirZ = lerp(dirW.z, up, horizon);
+float HeightProfile(FogLayer layer, float height)
+{
+    return saturate(exp((layer.upperHeight - height) * layer.upperFalloff)) *
+           saturate(exp((height - layer.lowerHeight) * layer.lowerFalloff));
+}
 
-    float phase[4];
-    float scale[4];
-    [unroll] for (int i = 0; i < 4; i++)
+void AccumulateLayer(FogLayer layer, float phase, float skyDensityScale, float stepStart, float sampleDistance,
+                     float stepLength, float sampleHeight, float sunVisibility, inout float3 radiance,
+                     inout float opticalDepth)
+{
+    float coverage = StepCoverage(layer, stepStart, sampleDistance, stepLength);
+    float distanceCurve = DistanceCurve(layer, sampleDistance);
+    float heightProfile = HeightProfile(layer, sampleHeight);
+    float directLight = lerp(1, sunVisibility, layer.shadowed);
+    float shadowDensityScale = lerp(1, lerp(layer.shadowDensity, 1, sunVisibility), layer.shadowed);
+    float layerOpticalDepth = layer.density * skyDensityScale * stepLength * coverage * distanceCurve * heightProfile *
+                              shadowDensityScale;
+    float3 emissive = lerp(layer.emissive, lerp(layer.shadowEmissive, layer.emissive, sunVisibility), layer.shadowed);
+    radiance += (layer.diffuse * (directLight * phase) + emissive) * layerOpticalDepth;
+    opticalDepth += layerOpticalDepth;
+}
+
+float StepJitter(float2 lowResTexel)
+{
+    return JitterEnabled() ? frac(InterleavedGradientNoise(lowResTexel) + FrameIndex() * kGoldenRatioFraction) : 0.5;
+}
+
+float4 main(float2 lowResTexel : VPOS) : COLOR0
+{
+    float2 pixel = LowResTexelToFullPixel(lowResTexel);
+    float3 viewRay = ViewRayAtUnitDepth(pixel);
+    float distancePerViewZ = length(viewRay);
+    float3 viewDirection = viewRay / distancePerViewZ;
+    float depth = SampleDepth(sDepth, pixel);
+    float skyMask = IsSky(depth) ? 1 : 0;
+    float viewZ = LinearDepth(depth);
+    float horizonBlend = max(BeyondFarClip(depth) ? 1 : 0, smoothstep(HorizonBlendStart(), FarClip(), viewZ));
+    viewZ = lerp(viewZ, MaxFogDistance(), horizonBlend);
+    float marchLength = min(viewZ * distancePerViewZ, MaxFogDistance());
+
+    float jitter = StepJitter(lowResTexel);
+    float3 cameraWorld = CameraPositionWorld();
+    float3 directionWorld = ViewToWorldDirection(viewDirection);
+    float cosToLight = dot(DirectionToLightView(), viewDirection);
+    float upward = max(directionWorld.z, 0);
+    float riseLevelledAtHorizon = lerp(directionWorld.z, upward, horizonBlend);
+
+    float phase[kFogLayers];
+    float skyDensityScale[kFogLayers];
+    [unroll] for (int i = 0; i < kFogLayers; i++)
     {
-        float4 l0 = cLayer[i * LAYER_REGS];
-        float4 l5 = cLayer[i * LAYER_REGS + 5];
-        phase[i] = lerp(PhaseHG(l0.z, cosT), 1, l0.w);
-        scale[i] = sky > 0 ? exp(-up * l5.y) : 1;
+        FogLayer layer = LoadFogLayer(i);
+        phase[i] = lerp(PhaseHG(layer.g, cosToLight), 1, layer.isotropic);
+        skyDensityScale[i] = skyMask > 0 ? exp(-upward * layer.skyFalloff) : 1;
     }
 
-    float3 L = 0;
-    float T = 1;
-    const float invN = 1.0 / STEPS;
+    float3 inScatteredRadiance = 0;
+    float transmittance = 1;
+    const float stepFraction = 1.0 / STEPS;
     [loop] for (int s = 0; s < STEPS; s++)
     {
-        float u0 = s * invN;
-        float u1 = u0 + invN;
-        float ta = tMax * u0 * u0;
-        float tb = tMax * u1 * u1;
-        float dt = tb - ta;
-        float t = lerp(ta, tb, jitter);
-        float h = camW.z + dirZ * t;
-        // Shadowed layers only: the light below the horizon counts as shadow, as in the modern shadowed
-        // injection (sunVis = shadow * sunAboveHorizon).
-        float vis = cToLight.w;
-        [branch] if (cShadow.z > 0)
-            vis *= SunVisibility(V * t, t, jitter);
-        float3 src = 0;
-        float tau = 0;
-        [unroll] for (int j = 0; j < 4; j++)
-            AccumulateLayer(j * LAYER_REGS, phase[j], scale[j], ta, t, dt, h, vis, src, tau);
-        [branch] if (tau > 1e-6)
+        float startFraction = s * stepFraction;
+        float endFraction = startFraction + stepFraction;
+        float stepStart = marchLength * startFraction * startFraction;
+        float stepEnd = marchLength * endFraction * endFraction;
+        float stepLength = stepEnd - stepStart;
+        float sampleDistance = lerp(stepStart, stepEnd, jitter);
+        float sampleHeight = cameraWorld.z + riseLevelledAtHorizon * sampleDistance;
+        float sunVisibility = LightAboveHorizon();
+        [branch] if (ShadowsEnabled())
+            sunVisibility *= ScreenSpaceSunVisibility(viewDirection * sampleDistance, sampleDistance, jitter);
+        float3 stepRadiance = 0;
+        float stepOpticalDepth = 0;
+        [unroll] for (int j = 0; j < kFogLayers; j++)
+            AccumulateLayer(LoadFogLayer(j), phase[j], skyDensityScale[j], stepStart, sampleDistance, stepLength,
+                            sampleHeight, sunVisibility, stepRadiance, stepOpticalDepth);
+        [branch] if (stepOpticalDepth > 1e-6)
         {
-            float tr = exp(-tau);
-            L += T * src * ((1 - tr) / tau);
-            T *= tr;
+            float stepTransmittance = exp(-stepOpticalDepth);
+            inScatteredRadiance += transmittance * stepRadiance * ((1 - stepTransmittance) / stepOpticalDepth);
+            transmittance *= stepTransmittance;
         }
     }
-    return float4(L, 1 - T);
+    return float4(inScatteredRadiance, 1 - transmittance);
 }

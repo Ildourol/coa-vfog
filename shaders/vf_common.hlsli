@@ -1,70 +1,161 @@
-// Shared constants and helpers. Register layout mirrors src/renderer.cpp.
-//
-// Conventions: row vectors (v * M), world Z up, view space +Z forward.
-// cProj holds the view->clip terms of the engine projection; depth is linearised
-// from the D3D depth the engine rasterises through its world viewport's MinZ..MaxZ.
-//
-// The client's depth buffer holds three ranges: the world in [MinZ, MaxZ] (MaxZ = 0.94, 0x004F9019),
-// the distant WDL terrain in [0.998, 0.999] with its own projection (0x007960EB), and the sky, which
-// writes no depth and keeps the clear value 1 (its viewport is [0.999, 1], 0x007F0A79).
+float4 cWorldViewportPx : register(c0);
+float4 cPixelGrid : register(c1);
+float4 cViewToNdc : register(c2);
+float4 cDepthToViewZ : register(c3);
+row_major float4x4 cViewToWorld : register(c4);
+float4 cLowResTarget : register(c8);
 
-float4 cRect      : register(c0);  // world viewport in render-target pixels: x, y, w, h
-float4 cLow       : register(c1);  // x = full pixels per low-res texel, y = frame index, zw = 1 / depth size
-float4 cProj      : register(c2);  // P00, P11, P20, P21
-float4 cDepthLin  : register(c3);  // world viewZ = y / (d - x); z = max distance; w = deepest world depth
-row_major float4x4 cInvView : register(c4);  // c4..c7 view -> world
-float4 cLowSize   : register(c8);  // low-res target: w, h, 1/w, 1/h
+static const float kSkyMinDepth = 0.99903;
 
-static const float kSkyDepth = 0.99903;
-
-float SampleDepth(sampler2D s, float2 px)
+float2 ViewportOrigin()
 {
-    return tex2Dlod(s, float4(px * cLow.zw, 0, 0)).r;
+    return cWorldViewportPx.xy;
 }
 
-// Beyond the far clip: the distant terrain or the sky.
-bool BeyondWorld(float d)
+float2 ViewportSize()
 {
-    return d > cDepthLin.w;
+    return cWorldViewportPx.zw;
 }
 
-bool IsSky(float d)
+float2 ViewportLastPixelCentre()
 {
-    return d >= max(cDepthLin.w, kSkyDepth);
+    return ViewportOrigin() + ViewportSize() - 0.5;
 }
 
-float LinearDepth(float d)
+bool OutsideViewport(float2 pixel)
 {
-    return BeyondWorld(d) ? cDepthLin.z : min(cDepthLin.y / (d - cDepthLin.x), cDepthLin.z);
+    return any(pixel < ViewportOrigin()) || any(pixel > ViewportOrigin() + ViewportSize());
 }
 
-// Full-resolution pixel centre represented by a low-res texel.
-float2 LowToFull(float2 texel)
+float FullPixelsPerLowResTexel()
 {
-    float2 px = cRect.xy + texel * cLow.x + floor(cLow.x * 0.5) + 0.5;
-    return min(px, cRect.xy + cRect.zw - 0.5);
+    return cPixelGrid.x;
 }
 
-// Continuous low-res texel coordinate (texel centres are integers) of a full-resolution position.
-float2 FullToLow(float2 px)
+float FrameIndex()
 {
-    return (px - cRect.xy - floor(cLow.x * 0.5) - 0.5) / cLow.x;
+    return cPixelGrid.y;
 }
 
-// View-space ray through a pixel centre, scaled so that z = 1.
-float3 ViewRay(float2 px)
+float2 DepthTexelSize()
 {
-    float2 ndc = float2((px.x - cRect.x) / cRect.z * 2 - 1, 1 - (px.y - cRect.y) / cRect.w * 2);
-    return float3((ndc.x - cProj.z) / cProj.x, (ndc.y - cProj.w) / cProj.y, 1);
+    return cPixelGrid.zw;
 }
 
-float2 ViewToPixel(float3 q)
+float2 ViewToNdcScale()
 {
-    float2 ndc = float2(q.x / q.z * cProj.x + cProj.z, q.y / q.z * cProj.y + cProj.w);
-    return cRect.xy + float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * cRect.zw;
+    return cViewToNdc.xy;
 }
 
-float InterleavedGradientNoise(float2 p)
+float2 ViewToNdcOffset()
 {
-    return frac(52.9829189 * frac(dot(p, float2(0.06711056, 0.00583715))));
+    return cViewToNdc.zw;
+}
+
+float DepthAtInfiniteViewZ()
+{
+    return cDepthToViewZ.x;
+}
+
+float DepthPerInverseViewZ()
+{
+    return cDepthToViewZ.y;
+}
+
+float MaxFogDistance()
+{
+    return cDepthToViewZ.z;
+}
+
+float DeepestWorldDepth()
+{
+    return cDepthToViewZ.w;
+}
+
+float3 CameraPositionWorld()
+{
+    return cViewToWorld[3].xyz;
+}
+
+float3 ViewToWorldDirection(float3 viewDirection)
+{
+    return mul(viewDirection, (float3x3)cViewToWorld);
+}
+
+float2 LowResSize()
+{
+    return cLowResTarget.xy;
+}
+
+float2 LowResTexelSize()
+{
+    return cLowResTarget.zw;
+}
+
+float SampleDepth(sampler2D depthSampler, float2 pixel)
+{
+    return tex2Dlod(depthSampler, float4(pixel * DepthTexelSize(), 0, 0)).r;
+}
+
+bool BeyondFarClip(float depth)
+{
+    return depth > DeepestWorldDepth();
+}
+
+bool IsSky(float depth)
+{
+    return depth >= max(DeepestWorldDepth(), kSkyMinDepth);
+}
+
+float LinearDepth(float depth)
+{
+    return BeyondFarClip(depth) ? MaxFogDistance()
+                                : min(DepthPerInverseViewZ() / (depth - DepthAtInfiniteViewZ()), MaxFogDistance());
+}
+
+float2 LowResTexelToFullPixel(float2 lowResTexel)
+{
+    float2 pixel = ViewportOrigin() + lowResTexel * FullPixelsPerLowResTexel() +
+                   floor(FullPixelsPerLowResTexel() * 0.5) + 0.5;
+    return min(pixel, ViewportLastPixelCentre());
+}
+
+float2 FullPixelToLowResTexel(float2 pixel)
+{
+    return (pixel - ViewportOrigin() - floor(FullPixelsPerLowResTexel() * 0.5) - 0.5) / FullPixelsPerLowResTexel();
+}
+
+float2 LowResTexelToUv(float2 lowResTexel)
+{
+    return (lowResTexel + 0.5) * LowResTexelSize();
+}
+
+float2 PixelToNdc(float2 pixel)
+{
+    return float2((pixel.x - ViewportOrigin().x) / ViewportSize().x * 2 - 1,
+                  1 - (pixel.y - ViewportOrigin().y) / ViewportSize().y * 2);
+}
+
+float2 NdcToPixel(float2 ndc)
+{
+    return ViewportOrigin() + float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * ViewportSize();
+}
+
+float3 ViewRayAtUnitDepth(float2 pixel)
+{
+    float2 ndc = PixelToNdc(pixel);
+    return float3((ndc.x - ViewToNdcOffset().x) / ViewToNdcScale().x,
+                  (ndc.y - ViewToNdcOffset().y) / ViewToNdcScale().y, 1);
+}
+
+float2 ViewToPixel(float3 viewPosition)
+{
+    float2 ndc = float2(viewPosition.x / viewPosition.z * ViewToNdcScale().x + ViewToNdcOffset().x,
+                        viewPosition.y / viewPosition.z * ViewToNdcScale().y + ViewToNdcOffset().y);
+    return NdcToPixel(ndc);
+}
+
+float InterleavedGradientNoise(float2 pixel)
+{
+    return frac(52.9829189 * frac(dot(pixel, float2(0.06711056, 0.00583715))));
 }
