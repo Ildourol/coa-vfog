@@ -9,16 +9,22 @@ day/night lighting elsewhere (Outland, Northrend, custom maps).
 
 ## Classic fog data
 
-`tools/convert_classic_fog.py` converts the kit's Classic `Light`, `LightData` and
-`LightDataGlobalVolumeFog` exports into `data/fogdata.bin` (625 lights, 2,079 time keys, 5,737 layers):
+`tools/convert_classic_fog.py` converts the kit's Classic `Light`, `LightData`, `LightDataGlobalVolumeFog`,
+`ZoneLight` and `ZoneLightPoint` exports into `data/fogdata.bin` (625 lights with all eight condition slots,
+2,079 time keys, 6,234 layer slots, 18 zone-light outlines):
 
 ```powershell
 python tools/convert_classic_fog.py <path>\coa-vfog-kit.zip data/fogdata.bin
 ```
 
 At run time the DLL blends the Classic lights around the camera (spheres: full weight inside the
-falloff start, linear to the falloff end, the map's global light takes the rest), interpolates the two
-time keys around the current time, pairs layers by their layer index, and applies the Classic transforms:
+falloff start, linear to the falloff end; the rest goes to the zone light whose outline holds the camera,
+fading in over 100 yd inside the outline with the innermost outline on top, and otherwise to the map's
+global light). Each light uses the condition slot the client itself uses for its stock lighting: the
+slot a screen effect forces (the ghost effect forces slot 4, death), otherwise clear weather (slot 0)
+blended toward storm (slot 2) by the client's storm weight. The DLL interpolates the two time keys around
+the current time and pairs layers by their Classic layer index; a layer only one side has keeps its
+colours and shape and has its density scaled by that side's weight. Then it applies the Classic transforms:
 density ×0.01, heights relative to the player when flag bit 1 is set, sun shadowing for flag bit 0
 (a light below the horizon counts as shadow), `1 + strength·((d − start)/range)^exponent` over a 5,000-yd
 fog range, and scatter intensities up to 10 in linear light. The fog is blended over the scene in linear
@@ -74,6 +80,8 @@ Engine inputs (all static addresses in the 12340 image):
 | Light colours: ambient, direct, sun | `0xD38BD4`, `0xD38BD8`, `0xD38BF8` |
 | Visible sun / moon sprite positions, sky centre | `0xD38E28`, `0xD38E48`, `0xD38B18` (day window `[0xA41CA4, 0xA41CA0]`) |
 | Camera in liquid | `0xCD8794` |
+| Storm weight (0..1) used to blend the clear and storm light params | `0xD38B88` |
+| Light params slot forced by the current screen effect (−1 = none) | `0xD38B58` |
 | Far clip | From the projection; `[[0xB7436C] + 0xB14]` as a fallback |
 
 Engine notes behind the code:
@@ -99,9 +107,20 @@ Engine notes behind the code:
   the value to `[0xA3E708]` (183.33) .. `[0xA3E710]` (1583.33). Its calls at `0x780810` (in the `farclip` CVar setter
   `0x780800`, also reached from Extensions.dll on zone changes) and `0x781444` (map load `0x781430`) are rare, so the
   hook re-reads the INI on every call.
-- Classic data. The converter keeps the `LightDataGlobalVolumeFog` rows the Classic client selects (flag bit 3,
-  ordered by layer index, at most nine per key). Classic fog applies where the lights carrying it hold at least half
-  of the blend weight; below that the derived layers take over, and the distance fog fades in across the edge.
+- Light params slots. `0x7EB180` returns a light's `LightParams` for a slot (`Light` record `+0x1C + 4·slot`). For
+  each light, `0x7EE510` takes slot 0 (1 under water) and, while the storm weight `[0xD38B88]` is above zero, blends
+  in slot 2 (3 under water) by it (`0x7EC220`). The DayNight update sets that weight to `min(1, 4·[0xD38B4C])` just
+  before the light blend (`0x7F3995`); the weather update writes `[0xD38B4C]` (`0x784A01`). The under-water flag is
+  the camera's liquid type (`LiquidType` `+0x28` light). When `[0xD38B58]` holds a slot, the light blend `0x7F3230`
+  uses that slot instead (`0x7F346F`). `0x7ECEC0` stores it from the current `ScreenEffect` row (`+0x1C`, called at
+  `0x4F712D`; values above 7 become −1) and `0x7ECEE0` clears it when the effect ends. In CoA's `ScreenEffect.dbc`
+  the Ghost effect (ID 1) and the other death-style effects use slot 4; a few event effects force slots 0, 1, 2, 3
+  or 5, which the DLL follows the same way.
+- Classic data. The converter keeps the `LightDataGlobalVolumeFog` rows the Classic client selects (flag bit 3) and
+  stores them at their layer index (0–2), leaving an empty slot where a key has no layer at that index. On maps where
+  any Classic light has fog (the old continents), Classic data applies wherever Classic lights hold at least half of
+  the blend weight; a light without fog in the active slot counts with zero density, so the fog thins smoothly
+  into it and the distance fog hides the far clip there. Maps without Classic fog use the derived layers.
 
 Two readings in the kit were corrected against the disassembly: the fog end is `0xD38BA8` (the kit's
 `0xD38B98` is a density-like value that Extensions.dll patches), and `0xD38C9C` is a near-constant model
@@ -135,6 +154,8 @@ through the same entry the hook uses, and checks:
   distant-terrain patch behind it, and sky transmittance against a CPU reference integration for
   derived and Classic layers;
 - Classic light blending and time-key interpolation at a known position against hand-computed values;
+- storm and screen-effect slot selection, layers paired by Classic index, zone-light outlines (interior,
+  edge fade, nesting) and the fog thinning into a Classic light without fog;
 - temporal accumulation converging on a static camera;
 - Reset at a new size and reference counts reaching zero.
 
@@ -192,8 +213,9 @@ writes `CoAVolFog.log` next to itself.
   stock fog up to the 3.3.5 far clip, which is far shorter than the modern client's.
 - `FarClipMax` raises memory use (about four times the loaded terrain in a 32-bit process); Ascension's
   reason for the continent cap is unknown. Without the key in the INI it stays off.
-- Classic data covers the lights the Classic `Light` table references (slot 0, clear weather); zone
-  lights, weather/underwater/death slots and noise modulation are not used yet.
+- Classic data follows the client's clear, storm and screen-effect slots and Classic's zone-light outlines.
+  The underwater slots and noise modulation are not used. The zone lights' edge fade distance is chosen here:
+  their `TransitionType` is 0 in every row and the modern client's transition rule is not known.
 - Not implemented from the kit: the froxel pipeline (M3), fitted fog for transparents (M6), in-game CVars.
 
 ## License

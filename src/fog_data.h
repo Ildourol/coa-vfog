@@ -24,8 +24,18 @@ struct AuthoredLayer
 };
 
 constexpr int kMaxAuthoredLayers = 3;
-constexpr float kMinimumFogCoverage = 0.5f;
-constexpr int kMaxBlendedLights = 4;
+constexpr float kMinimumClassicCoverage = 0.5f;
+constexpr int kMaxSphereLights = 3;
+constexpr int kMaxZoneLightNesting = 3;
+constexpr int kMaxBlendedLights = kMaxSphereLights + kMaxZoneLightNesting + 1;
+constexpr int kNoScreenEffectLightSlot = -1;
+constexpr float kZoneLightEdgeFade = 100.0f;
+
+struct LightParamsSelection
+{
+    float stormBlend = 0.0f;
+    int screenEffectSlot = kNoScreenEffectLightSlot;
+};
 
 struct AuthoredFog
 {
@@ -43,11 +53,15 @@ public:
     bool Load(const std::string& path);
     bool Loaded() const { return !m_lights.empty(); }
 
-    bool Resolve(int mapId, const float* position, float dayFraction, int lightParamsSlot, AuthoredFog& out) const;
+    bool Resolve(int mapId, const float* position, float dayFraction, const LightParamsSelection& selection,
+                 AuthoredFog& out) const;
+
+    static constexpr int kLightParamsSlots = 8;
+    static constexpr int kClearSlot = 0;
+    static constexpr int kStormSlot = 2;
+    static constexpr int kDeathSlot = 4;
 
 private:
-    static constexpr int kLightParamsSlots = 8;
-
     struct Light
     {
         uint32_t id;
@@ -87,19 +101,67 @@ private:
         float strength;
         float exponent;
     };
-    static_assert(sizeof(Light) == 60 && sizeof(Params) == 12 && sizeof(Key) == 8 && sizeof(Layer) == 60,
+    struct ZoneLight
+    {
+        uint32_t id;
+        int32_t mapId;
+        uint32_t lightId;
+        float zMin;
+        float zMax;
+        uint32_t firstPoint;
+        uint32_t pointCount;
+    };
+    struct ZonePoint
+    {
+        float x;
+        float y;
+    };
+    static_assert(sizeof(Light) == 60 && sizeof(Params) == 12 && sizeof(Key) == 8 && sizeof(Layer) == 60 &&
+                      sizeof(ZoneLight) == 28 && sizeof(ZonePoint) == 8,
                   "records match the struct formats of tools/convert_classic_fog.py");
+
+    struct ZoneOutline
+    {
+        const ZoneLight* zone;
+        const Light* light;
+        float area;
+    };
+    struct Contribution
+    {
+        const Light* light;
+        float weight;
+    };
+    struct LightBlend
+    {
+        Contribution lights[kMaxBlendedLights];
+        int count;
+        void Add(const Light* light, float weight);
+        void Scale(float factor);
+    };
 
     static bool IsMapWide(const Light& light);
     static float SphereWeight(const Light& light, const float* position);
+    const Light* FindLight(uint32_t id) const;
     const Params* FindParams(uint32_t id) const;
-    const Params* SlotParams(const Light& light, int lightParamsSlot) const;
+    float EnclosedArea(const ZoneLight& zone) const;
+    float ZoneWeight(const ZoneLight& zone, const float* position) const;
+    bool BuildZoneOutlines();
+    bool HasFogInAnySlot(const Light& light) const;
+    void CollectMapsWithFog();
+    LightBlend BlendLights(int mapId, const float* position) const;
+    static AuthoredLayer Unpack(const Layer& layer);
     int InterpolateKeys(const Params& params, float halfMinuteOfDay, AuthoredLayer* out) const;
+    int ConditionLayers(const Light& light, float halfMinuteOfDay, const LightParamsSelection& selection,
+                        AuthoredLayer* out) const;
 
     std::vector<Light> m_lights;
     std::vector<Params> m_params;
     std::vector<Key> m_keys;
     std::vector<Layer> m_layers;
+    std::vector<ZoneLight> m_zoneLights;
+    std::vector<ZonePoint> m_zonePoints;
+    std::vector<ZoneOutline> m_zonesLargestFirst;
+    std::vector<int32_t> m_mapsWithFog;
 };
 
 FogData& GlobalFogData();

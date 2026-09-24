@@ -217,7 +217,7 @@ float SceneLayersLevelRayOpticalDepth(const FogParams& p, float cameraZ)
 
 float ClassicFogThinness(const FogParams& p, const AuthoredFog& fog, float cameraZ)
 {
-    const float coverageEdge = 1.0f - SmoothStep(kMinimumFogCoverage, 1.0f, fog.coverage);
+    const float coverageEdge = 1.0f - SmoothStep(kMinimumClassicCoverage, 1.0f, fog.coverage);
     const float levelRayOpticalDepth = SceneLayersLevelRayOpticalDepth(p, cameraZ);
     const float levelRayThinness = std::clamp(1.0f - levelRayOpticalDepth / kFarOpticalDepth, 0.0f, 1.0f);
     return std::max(coverageEdge, levelRayThinness);
@@ -257,7 +257,7 @@ FogParams BuildFogParams(const FrameInputs& in, const Config& cfg, const Authore
 {
     FogParams p = {};
     p.linear = cfg.colorSpace == 1;
-    p.authored = authored && authored->layerCount > 0;
+    p.authored = authored != nullptr;
     float fogColor[3];
     UnpackColor(in.fogColor, fogColor);
     UnpackColor(in.directColor, p.lightColor);

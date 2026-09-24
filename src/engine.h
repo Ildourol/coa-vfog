@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <d3d9.h>
 
+#include "fog_data.h"
+
 #include <cstdint>
 
 struct FrameInputs
@@ -26,6 +28,7 @@ struct FrameInputs
     float clientGlowAmount;
     bool inLiquid;
     int mapId;
+    LightParamsSelection lightParams;
 };
 
 namespace engine
