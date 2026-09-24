@@ -10,8 +10,8 @@ constexpr D3DFORMAT kIntz = static_cast<D3DFORMAT>(MAKEFOURCC('I', 'N', 'T', 'Z'
 constexpr int kMaxDevices = 8;
 
 Direct3DCreate9Fn g_realCreate = nullptr;
-bool g_fogAllowed = false;
-FogDevice* g_active = nullptr;
+bool g_fogAllowedOnNewDevices = false;
+FogDevice* g_latestFogDevice = nullptr;
 FogDevice* g_devices[kMaxDevices] = {};
 
 void Register(FogDevice* device)
@@ -29,8 +29,16 @@ void Unregister(FogDevice* device)
     for (auto*& slot : g_devices)
         if (slot == device)
             slot = nullptr;
-    if (g_active == device)
-        g_active = nullptr;
+    if (g_latestFogDevice == device)
+        g_latestFogDevice = nullptr;
+}
+
+FogDevice* RegisteredWrapperOf(void* gameDevice)
+{
+    for (FogDevice* device : g_devices)
+        if (IsWrapperOf(device, gameDevice))
+            return device;
+    return nullptr;
 }
 
 class WrappedD3D9;
@@ -45,22 +53,18 @@ public:
     IDirect3DDevice9* Real() const { return m_real; }
     bool CreateDepth();
     bool Render(const FrameInputs& in, const Config& cfg, const char** skip);
-    // While forced, depth writes stay on regardless of what the client requests; the client's last
-    // request is re-applied when forcing ends, so its state cache stays accurate.
     void ForceDepthWrite(bool force)
     {
         if (force == m_forceDepthWrite)
             return;
         m_forceDepthWrite = force;
-        m_real->SetRenderState(D3DRS_ZWRITEENABLE, force ? TRUE : m_engineDepthWrite);
+        m_real->SetRenderState(D3DRS_ZWRITEENABLE, DepthWriteToApply());
     }
 
-    // IUnknown
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override;
     ULONG STDMETHODCALLTYPE AddRef() override;
     ULONG STDMETHODCALLTYPE Release() override;
 
-    // IDirect3DDevice9
     HRESULT STDMETHODCALLTYPE TestCooperativeLevel() override { return m_real->TestCooperativeLevel(); }
     UINT STDMETHODCALLTYPE GetAvailableTextureMem() override { return m_real->GetAvailableTextureMem(); }
     HRESULT STDMETHODCALLTYPE EvictManagedResources() override { return m_real->EvictManagedResources(); }
@@ -224,13 +228,10 @@ public:
     HRESULT STDMETHODCALLTYPE GetClipPlane(DWORD i, float* p) override { return m_real->GetClipPlane(i, p); }
     HRESULT STDMETHODCALLTYPE SetRenderState(D3DRENDERSTATETYPE s, DWORD v) override
     {
-        if (s == D3DRS_ZWRITEENABLE)
-        {
-            m_engineDepthWrite = v;
-            if (m_forceDepthWrite)
-                v = TRUE;
-        }
-        return m_real->SetRenderState(s, v);
+        if (s != D3DRS_ZWRITEENABLE)
+            return m_real->SetRenderState(s, v);
+        m_clientRequestedDepthWrite = v;
+        return m_real->SetRenderState(s, DepthWriteToApply());
     }
     HRESULT STDMETHODCALLTYPE GetRenderState(D3DRENDERSTATETYPE s, DWORD* v) override
     {
@@ -442,9 +443,10 @@ private:
     ~FogDevice();
     void ReleaseDepth();
     bool BindFallbackDepth();
+    DWORD DepthWriteToApply() const { return m_forceDepthWrite ? TRUE : m_clientRequestedDepthWrite; }
 
     LONG m_ref = 1;
-    DWORD m_engineDepthWrite = TRUE;
+    DWORD m_clientRequestedDepthWrite = TRUE;
     bool m_forceDepthWrite = false;
     WrappedD3D9* m_parent;
     IDirect3DDevice9* m_real;
@@ -535,7 +537,7 @@ public:
     HRESULT STDMETHODCALLTYPE CheckDeviceMultiSampleType(UINT a, D3DDEVTYPE t, D3DFORMAT f, BOOL w,
                                                          D3DMULTISAMPLE_TYPE ms, DWORD* q) override
     {
-        if (g_fogAllowed && ms != D3DMULTISAMPLE_NONE)
+        if (g_fogAllowedOnNewDevices && ms != D3DMULTISAMPLE_NONE)
             return D3DERR_NOTAVAILABLE;
         return m_real->CheckDeviceMultiSampleType(a, t, f, w, ms, q);
     }
@@ -579,7 +581,7 @@ HRESULT WrappedD3D9::CreateDevice(UINT adapter, D3DDEVTYPE type, HWND window, DW
 {
     if (!pp || !out)
         return D3DERR_INVALIDCALL;
-    bool fog = g_fogAllowed && GlobalConfig().Get().enable && pp->EnableAutoDepthStencil;
+    bool fog = g_fogAllowedOnNewDevices && GlobalConfig().Get().enable && pp->EnableAutoDepthStencil;
     if (fog && !SupportsIntz(adapter, type, *pp))
     {
         VF_LOG_ERROR("INTZ depth textures are not supported on this adapter; fog disabled");
@@ -613,7 +615,7 @@ HRESULT WrappedD3D9::CreateDevice(UINT adapter, D3DDEVTYPE type, HWND window, DW
                 used.BackBufferHeight, used.Windowed, flags, usedFlags, pp->MultiSampleType,
                 device->FogActive() ? 1 : 0);
     if (device->FogActive())
-        g_active = device;
+        g_latestFogDevice = device;
     *out = device;
     return hr;
 }
@@ -685,8 +687,8 @@ bool FogDevice::CreateDepth()
 
     ReleaseDepth();
     m_fog = false;
-    if (g_active == this)
-        g_active = nullptr;
+    if (g_latestFogDevice == this)
+        g_latestFogDevice = nullptr;
     BindFallbackDepth();
     return false;
 }
@@ -773,14 +775,14 @@ IDirect3D9* WINAPI WrappedDirect3DCreate9(UINT sdkVersion)
     return new WrappedD3D9(real);
 }
 
-void AllowFog(bool allowed)
+void AllowFog(bool allowedOnNewDevices)
 {
-    g_fogAllowed = allowed;
+    g_fogAllowedOnNewDevices = allowedOnNewDevices;
 }
 
 FogDevice* ActiveFogDevice()
 {
-    return g_active;
+    return g_latestFogDevice;
 }
 
 bool IsWrapperOf(FogDevice* device, void* gameDevice)
@@ -790,10 +792,10 @@ bool IsWrapperOf(FogDevice* device, void* gameDevice)
 
 FogDevice* FindFogDevice(void* gameDevice)
 {
-    for (FogDevice* device : g_devices)
-        if (device && static_cast<IDirect3DDevice9*>(device) == gameDevice)
-            return device->FogActive() ? device : nullptr;
-    return g_active;
+    FogDevice* wrapper = RegisteredWrapperOf(gameDevice);
+    if (!wrapper)
+        return g_latestFogDevice;
+    return wrapper->FogActive() ? wrapper : nullptr;
 }
 
 IDirect3DDevice9* RealDevice(FogDevice* device)

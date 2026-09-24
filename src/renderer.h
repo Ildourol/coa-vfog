@@ -11,13 +11,10 @@ class Renderer
 public:
     ~Renderer();
 
-    // Default-pool resources must go before IDirect3DDevice9::Reset.
     void ReleaseDefaultPool();
     void ReleaseAll();
 
-    // Composites fog onto the currently bound render target. The depth surface must be bound
-    // as the device's depth-stencil and is sampled through depthTexture.
-    bool Render(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DSurface9* depthSurface,
+    bool Render(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DSurface9* boundDepthStencil,
                 const FrameInputs& in, const Config& cfg);
 
     const char* LastSkipReason() const { return m_skip; }
@@ -27,10 +24,12 @@ private:
     bool EnsureStateBlock(IDirect3DDevice9* dev);
     bool EnsureTargets(IDirect3DDevice9* dev, UINT lowW, UINT lowH, UINT rayW, UINT rayH);
     bool EnsureSceneCopy(IDirect3DDevice9* dev, IDirect3DSurface9* target, UINT w, UINT h);
+    bool CopyWorldViewport(IDirect3DDevice9* dev, IDirect3DSurface9* target, const D3DVIEWPORT9& vp);
     bool Skip(const char* reason);
     void LogLightChange(const FrameInputs& in, const AuthoredFog& fog, bool authored);
-    void LogProbe(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DTexture9* fog,
-                  const D3DVIEWPORT9& vp, float worldDepthLimit, float dayFraction);
+    bool DepthProbeDue(long long now) const;
+    void LogDepthProbe(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DTexture9* fog,
+                       const D3DVIEWPORT9& vp, float deepestWorldDepth, float dayFraction);
     void DrawFullscreen(IDirect3DDevice9* dev);
     void BindTexture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseTexture9* tex, bool linear);
     bool RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DSurface9* target,
@@ -49,22 +48,22 @@ private:
     IDirect3DTexture9* m_marchTarget = nullptr;
     IDirect3DTexture9* m_history[2] = {};
     IDirect3DTexture9* m_rays[2] = {};
-    IDirect3DTexture9* m_scene = nullptr;
+    IDirect3DTexture9* m_sceneCopy = nullptr;
     IDirect3DTexture9* m_probeTarget = nullptr;
     IDirect3DSurface9* m_probeReadback = nullptr;
     UINT m_lowW = 0;
     UINT m_lowH = 0;
     UINT m_rayW = 0;
     UINT m_rayH = 0;
-    UINT m_sceneW = 0;
-    UINT m_sceneH = 0;
-    bool m_sceneFailed = false;
+    UINT m_sceneCopyW = 0;
+    UINT m_sceneCopyH = 0;
+    bool m_sceneCopyFailed = false;
     bool m_probeFailed = false;
     bool m_fogFilterable = false;
 
     int m_historyIndex = 0;
     bool m_historyValid = false;
-    float m_prevView[16] = {};
+    float m_prevWorldToView[16] = {};
     float m_prevProj[16] = {};
     float m_prevCam[3] = {};
     D3DVIEWPORT9 m_prevViewport = {};

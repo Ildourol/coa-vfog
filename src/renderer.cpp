@@ -24,16 +24,16 @@ namespace
 constexpr UINT kPixelConstants = 36;
 constexpr DWORD kStages = 4;
 constexpr UINT kRayScale = 4;
-// Deepest world depth when the world viewport spans the whole [0, 1] range (the harness); the client
-// draws the world into [0, 0.94] instead, and the WDL terrain and sky behind it.
-constexpr float kFullRangeDepthLimit = 0.9999995f;
+constexpr float kMinViewportDepthExtent = 0.01f;
+constexpr float kDeepestWorldDepthInFullRangeViewport = 0.9999995f;
 constexpr float kWorldDepthMargin = 2.0e-6f;
 constexpr float kSummarySeconds = 60.0f;
 constexpr float kProbeSeconds = 60.0f;
 constexpr float kProbeDebugSeconds = 30.0f;
 constexpr unsigned kProbeFirstFrame = 60;
-constexpr unsigned kProbeInfoLimit = 5;
-constexpr UINT kProbePoints = 25;
+constexpr unsigned kInfoLevelGpuStallingProbeLimit = 5;
+constexpr int kProbeGridSide = 5;
+constexpr UINT kProbePoints = kProbeGridSide * kProbeGridSide;
 constexpr float kRayFalloff = 8.0f;
 constexpr float kRayThreshold = 0.12f;
 constexpr float kRayStep = 0.075f;
@@ -115,6 +115,68 @@ void Normalize3(float* v)
         v[2] /= len;
     }
 }
+
+RECT ViewportRect(const D3DVIEWPORT9& vp)
+{
+    return {static_cast<LONG>(vp.X), static_cast<LONG>(vp.Y), static_cast<LONG>(vp.X + vp.Width),
+            static_cast<LONG>(vp.Y + vp.Height)};
+}
+
+bool WorldViewFromCameraRelative(const FrameInputs& in, float* viewToWorld, float* worldToView)
+{
+    if (!Invert4x4(in.view, viewToWorld))
+        return false;
+    viewToWorld[12] = in.camPos[0];
+    viewToWorld[13] = in.camPos[1];
+    viewToWorld[14] = in.camPos[2];
+    return Invert4x4(viewToWorld, worldToView);
+}
+
+struct WorldDepthMapping
+{
+    float atInfinity;
+    float perInverseViewDepth;
+    float deepest;
+};
+
+WorldDepthMapping MapWorldDepth(const float* proj, const D3DVIEWPORT9& vp)
+{
+    const bool usableRange = vp.MaxZ - vp.MinZ > kMinViewportDepthExtent && vp.MinZ >= 0.0f && vp.MaxZ <= 1.0f;
+    const float worldMinZ = usableRange ? vp.MinZ : 0.0f;
+    const float worldExtent = usableRange ? vp.MaxZ - vp.MinZ : 1.0f;
+    const float worldMaxZ = worldMinZ + worldExtent;
+    return {worldMinZ + worldExtent * (1.0f + proj[10]) * 0.5f, worldExtent * proj[14] * 0.5f,
+            worldMaxZ >= kDeepestWorldDepthInFullRangeViewport ? kDeepestWorldDepthInFullRangeViewport
+                                                               : worldMaxZ + kWorldDepthMargin};
+}
+
+enum class FogBlend
+{
+    GammaFixedFunction,
+    LinearOverSceneCopy,
+    LinearFixedFunction,
+};
+
+const char* FogBlendName(FogBlend blend)
+{
+    static const char* const kNames[] = {"gamma, fixed function", "linear over a scene copy",
+                                         "linear, fixed function (no scene copy)"};
+    return kNames[static_cast<int>(blend)];
+}
+
+struct ProbeSample
+{
+    float rawDepth;
+    float viewDepthYards;
+    float fogOpacity;
+    float depthClass;
+};
+static_assert(sizeof(ProbeSample) == sizeof(Float4), "ProbeSample is one A32B32G32R32F probe texel");
+
+char DepthClassLetter(float depthClass)
+{
+    return depthClass > 1.5f ? 's' : (depthClass > 0.5f ? 'f' : 'w');
+}
 }
 
 Renderer::~Renderer()
@@ -129,13 +191,13 @@ void Renderer::ReleaseDefaultPool()
     SafeRelease(m_history[1]);
     SafeRelease(m_rays[0]);
     SafeRelease(m_rays[1]);
-    SafeRelease(m_scene);
+    SafeRelease(m_sceneCopy);
     SafeRelease(m_probeTarget);
     SafeRelease(m_probeReadback);
     SafeRelease(m_state);
     m_lowW = m_lowH = m_rayW = m_rayH = 0;
-    m_sceneW = m_sceneH = 0;
-    m_sceneFailed = false;
+    m_sceneCopyW = m_sceneCopyH = 0;
+    m_sceneCopyFailed = false;
     m_probeFailed = false;
     m_historyValid = false;
 }
@@ -298,32 +360,51 @@ bool Renderer::EnsureTargets(IDirect3DDevice9* dev, UINT lowW, UINT lowH, UINT r
     return true;
 }
 
-// A copy of the world viewport for blending the fog in linear light. Without one the composite falls back
-// to the fixed-function blend.
 bool Renderer::EnsureSceneCopy(IDirect3DDevice9* dev, IDirect3DSurface9* target, UINT w, UINT h)
 {
-    if (m_scene && m_sceneW == w && m_sceneH == h)
+    if (m_sceneCopy && m_sceneCopyW == w && m_sceneCopyH == h)
         return true;
-    SafeRelease(m_scene);
-    m_sceneW = m_sceneH = 0;
-    if (m_sceneFailed)
+    SafeRelease(m_sceneCopy);
+    m_sceneCopyW = m_sceneCopyH = 0;
+    if (m_sceneCopyFailed)
         return false;
     D3DSURFACE_DESC desc = {};
     target->GetDesc(&desc);
-    if (!CreateTarget(dev, w, h, desc.Format, &m_scene) && !CreateTarget(dev, w, h, D3DFMT_A8R8G8B8, &m_scene))
+    if (!CreateTarget(dev, w, h, desc.Format, &m_sceneCopy) &&
+        !CreateTarget(dev, w, h, D3DFMT_A8R8G8B8, &m_sceneCopy))
     {
-        m_sceneFailed = true;
+        m_sceneCopyFailed = true;
         VF_LOG_ERROR("scene copy creation failed (%ux%u); fog blends in gamma space", w, h);
         return false;
     }
-    m_sceneW = w;
-    m_sceneH = h;
+    m_sceneCopyW = w;
+    m_sceneCopyH = h;
     return true;
 }
 
-// Logs raw depth, linear depth and fog opacity at a 5x5 grid, so a log shows what the fog sees in the client.
-void Renderer::LogProbe(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DTexture9* fog,
-                        const D3DVIEWPORT9& vp, float worldDepthLimit, float dayFraction)
+bool Renderer::CopyWorldViewport(IDirect3DDevice9* dev, IDirect3DSurface9* target, const D3DVIEWPORT9& vp)
+{
+    if (!EnsureSceneCopy(dev, target, vp.Width, vp.Height))
+        return false;
+    const RECT world = ViewportRect(vp);
+    IDirect3DSurface9* sceneSurface = nullptr;
+    const bool copied = SUCCEEDED(m_sceneCopy->GetSurfaceLevel(0, &sceneSurface)) &&
+                        SUCCEEDED(dev->StretchRect(target, &world, sceneSurface, nullptr, D3DTEXF_POINT));
+    SafeRelease(sceneSurface);
+    return copied;
+}
+
+bool Renderer::DepthProbeDue(long long now) const
+{
+    const bool debugLog = LogEnabled(LogLevel::Debug);
+    const float probeIntervalSeconds = debugLog ? kProbeDebugSeconds : kProbeSeconds;
+    return LogEnabled(LogLevel::Info) && !m_probeFailed && m_frame >= kProbeFirstFrame &&
+           (debugLog || m_probeAttempts < kInfoLevelGpuStallingProbeLimit) &&
+           (m_probeAttempts == 0 || TickSeconds(now - m_probeTicks) > probeIntervalSeconds);
+}
+
+void Renderer::LogDepthProbe(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DTexture9* fog,
+                             const D3DVIEWPORT9& vp, float deepestWorldDepth, float dayFraction)
 {
     if (m_probeFailed)
         return;
@@ -361,19 +442,19 @@ void Renderer::LogProbe(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, 
         VF_LOG_INFO("depth probe %u: readback failed", m_probeAttempts);
         return;
     }
-    const float* p = static_cast<const float*>(locked.pBits);
+    const auto* samples = static_cast<const ProbeSample*>(locked.pBits);
     VF_LOG_INFO("depth probe %u: day %.4f, viewport depth %.4f..%.4f, world depth up to %.7f; per point raw depth / yd "
                 "/ fog opacity (w world, f beyond the far clip, s sky)",
-                m_probeAttempts, dayFraction, vp.MinZ, vp.MaxZ, worldDepthLimit);
-    for (int row = 0; row < 5; ++row)
+                m_probeAttempts, dayFraction, vp.MinZ, vp.MaxZ, deepestWorldDepth);
+    for (int row = 0; row < kProbeGridSide; ++row)
     {
         char line[256] = {};
         int used = 0;
-        for (int col = 0; col < 5; ++col)
+        for (int col = 0; col < kProbeGridSide; ++col)
         {
-            const float* t = p + (row * 5 + col) * 4;
-            const char cls = t[3] > 1.5f ? 's' : (t[3] > 0.5f ? 'f' : 'w');
-            used += std::snprintf(line + used, sizeof(line) - used, "  %.7f/%.0f/%.2f %c", t[0], t[1], t[2], cls);
+            const ProbeSample& sample = samples[row * kProbeGridSide + col];
+            used += std::snprintf(line + used, sizeof(line) - used, "  %.7f/%.0f/%.2f %c", sample.rawDepth,
+                                  sample.viewDepthYards, sample.fogOpacity, DepthClassLetter(sample.depthClass));
         }
         VF_LOG_INFO("  row %d:%s", row, line);
     }
@@ -382,7 +463,8 @@ void Renderer::LogProbe(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, 
 
 void Renderer::DrawFullscreen(IDirect3DDevice9* dev)
 {
-    static const float kTriangle[3][4] = {{-1.0f, -1.0f, 0.0f, 1.0f}, {-1.0f, 3.0f, 0.0f, 1.0f}, {3.0f, -1.0f, 0.0f, 1.0f}};
+    static const float kTriangle[3][4] = {
+        {-1.0f, -1.0f, 0.0f, 1.0f}, {-1.0f, 3.0f, 0.0f, 1.0f}, {3.0f, -1.0f, 0.0f, 1.0f}};
     dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, kTriangle, sizeof(kTriangle[0]));
 }
 
@@ -400,7 +482,7 @@ void Renderer::BindTexture(IDirect3DDevice9* dev, DWORD stage, IDirect3DBaseText
     dev->SetSamplerState(stage, D3DSAMP_MAXMIPLEVEL, 0);
 }
 
-bool Renderer::Render(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DSurface9* depthSurface,
+bool Renderer::Render(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, IDirect3DSurface9* boundDepthStencil,
                       const FrameInputs& in, const Config& cfg)
 {
     m_skip = "";
@@ -420,9 +502,9 @@ bool Renderer::Render(IDirect3DDevice9* dev, IDirect3DTexture9* depthTexture, ID
     D3DSURFACE_DESC depthDesc = {};
     if (!saved[0])
         Skip("no render target");
-    else if (savedDepth != depthSurface)
+    else if (savedDepth != boundDepthStencil)
         Skip("fog depth surface not bound");
-    else if (FAILED(saved[0]->GetDesc(&rtDesc)) || FAILED(depthSurface->GetDesc(&depthDesc)))
+    else if (FAILED(saved[0]->GetDesc(&rtDesc)) || FAILED(boundDepthStencil->GetDesc(&depthDesc)))
         Skip("surface description failed");
     else if (rtDesc.Width != depthDesc.Width || rtDesc.Height != depthDesc.Height)
         Skip("render target and depth sizes differ");
@@ -470,51 +552,37 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
     if (!EnsureTargets(dev, lowW, lowH, rayW, rayH))
         return false;
 
-    // The client renders camera-relative: its view matrix carries no translation. Rebuild the
-    // absolute world transform from the camera position so heights and reprojection are in world space.
-    float invView[16];
-    float viewAbs[16];
-    if (!Invert4x4(in.view, invView))
-        return Skip("view matrix not invertible");
-    invView[12] = in.camPos[0];
-    invView[13] = in.camPos[1];
-    invView[14] = in.camPos[2];
-    if (!Invert4x4(invView, viewAbs))
+    float viewToWorld[16];
+    float worldToView[16];
+    if (!WorldViewFromCameraRelative(in, viewToWorld, worldToView))
         return Skip("view matrix not invertible");
 
     AuthoredFog authored = {};
-    const bool hasAuthored = cfg.dataMode == 1 && GlobalFogData().Resolve(in.mapId, in.camPos, in.dayFraction, 0, authored);
+    const bool hasAuthored =
+        cfg.dataMode == 1 && GlobalFogData().Resolve(in.mapId, in.camPos, in.dayFraction, 0, authored);
     const FogParams fog = BuildFogParams(in, cfg, hasAuthored ? &authored : nullptr);
     LogLightChange(in, authored, hasAuthored);
-    // The engine projection maps view depth to [0, 1] as A + B / z; the world viewport then squeezes that
-    // into [MinZ, MaxZ] (the client passes MaxZ 0.94). Everything deeper is distant terrain or sky.
-    const float* P = in.proj;
-    const bool ranged = vp.MaxZ - vp.MinZ > 0.01f && vp.MinZ >= 0.0f && vp.MaxZ <= 1.0f;
-    const float zMin = ranged ? vp.MinZ : 0.0f;
-    const float zRange = ranged ? vp.MaxZ - vp.MinZ : 1.0f;
-    const float depthA = zMin + zRange * (1.0f + P[10]) * 0.5f;
-    const float depthB = zRange * P[14] * 0.5f;
-    const float worldDepthLimit =
-        zMin + zRange >= kFullRangeDepthLimit ? kFullRangeDepthLimit : zMin + zRange + kWorldDepthMargin;
+    const float* proj = in.proj;
+    const WorldDepthMapping worldDepth = MapWorldDepth(proj, vp);
 
-    float toLightV[3];
-    TransformDirection(in.toLight, in.view, toLightV);
-    Normalize3(toLightV);
+    float toLightInView[3];
+    TransformDirection(in.toLight, in.view, toLightInView);
+    Normalize3(toLightInView);
 
     float common[9][4] = {
         {static_cast<float>(vp.X), static_cast<float>(vp.Y), static_cast<float>(vp.Width),
          static_cast<float>(vp.Height)},
         {static_cast<float>(scale), static_cast<float>(m_frame % 1024u), 1.0f / depthDesc.Width,
          1.0f / depthDesc.Height},
-        {P[0], P[5], P[8], P[9]},
-        {depthA, depthB, fog.maxDistance, worldDepthLimit},
+        {proj[0], proj[5], proj[8], proj[9]},
+        {worldDepth.atInfinity, worldDepth.perInverseViewDepth, fog.maxDistance, worldDepth.deepest},
         {},
         {},
         {},
         {},
         {static_cast<float>(lowW), static_cast<float>(lowH), 1.0f / lowW, 1.0f / lowH},
     };
-    std::memcpy(common[4], invView, sizeof(invView));
+    std::memcpy(common[4], viewToWorld, sizeof(viewToWorld));
 
     const long long now = Ticks();
     const float dx = in.camPos[0] - m_prevCam[0];
@@ -526,16 +594,16 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
                               dx * dx + dy * dy + dz * dz < kHistoryMaxMove * kHistoryMaxMove;
     float reproj[16];
     float prevViewProj[16];
-    Mul4x4(m_prevView, m_prevProj, prevViewProj);
-    Mul4x4(invView, prevViewProj, reproj);
+    Mul4x4(m_prevWorldToView, m_prevProj, prevViewProj);
+    Mul4x4(viewToWorld, prevViewProj, reproj);
 
     float sunPx[2] = {};
-    bool sunInFront = toLightV[2] > 0.05f;
+    bool sunInFront = toLightInView[2] > 0.05f;
     float sunScreenFade = 0.0f;
     if (sunInFront)
     {
-        float ndcX = toLightV[0] / toLightV[2] * P[0] + P[8];
-        float ndcY = toLightV[1] / toLightV[2] * P[5] + P[9];
+        float ndcX = toLightInView[0] / toLightInView[2] * proj[0] + proj[8];
+        float ndcY = toLightInView[1] / toLightInView[2] * proj[5] + proj[9];
         sunPx[0] = vp.X + (ndcX * 0.5f + 0.5f) * vp.Width;
         sunPx[1] = vp.Y + (0.5f - ndcY * 0.5f) * vp.Height;
         sunScreenFade = std::clamp(1.6f - std::max(std::fabs(ndcX), std::fabs(ndcY)), 0.0f, 1.0f);
@@ -553,20 +621,20 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
         m_summaryTicks = now;
         m_loggedFarClip = in.farClip;
         m_loggedViewport = vp;
-        float n = -P[14] / (1.0f + P[10]);
-        float f = P[14] / (1.0f - P[10]);
+        float projectionNear = -proj[14] / (1.0f + proj[10]);
+        float projectionFar = proj[14] / (1.0f - proj[10]);
         VF_LOG_INFO("frame %u: viewport %lu,%lu %lux%lu of %ux%u depth %.4f..%.4f; near %.3f far %.1f (farclip %.1f) "
                     "maxdist %.0f",
-                    m_frame, vp.X, vp.Y, vp.Width, vp.Height, depthDesc.Width, depthDesc.Height, vp.MinZ, vp.MaxZ, n, f,
-                    in.farClip, fog.maxDistance);
+                    m_frame, vp.X, vp.Y, vp.Width, vp.Height, depthDesc.Width, depthDesc.Height, vp.MinZ, vp.MaxZ,
+                    projectionNear, projectionFar, in.farClip, fog.maxDistance);
         VF_LOG_INFO("  camera (%.2f %.2f %.2f) inverse-view origin (%.2f %.2f %.2f) target (%.2f %.2f %.2f)",
-                    in.camPos[0], in.camPos[1], in.camPos[2], invView[12], invView[13], invView[14],
+                    in.camPos[0], in.camPos[1], in.camPos[2], viewToWorld[12], viewToWorld[13], viewToWorld[14],
                     in.camTarget[0], in.camTarget[1], in.camTarget[2]);
-        VF_LOG_INFO("  day %.4f %s toLight (%.3f %.3f %.3f) view (%.3f %.3f %.3f) vis %.2f above %.2f sunPx (%.0f %.0f) "
-                    "rays %.2f",
+        VF_LOG_INFO("  day %.4f %s toLight (%.3f %.3f %.3f) view (%.3f %.3f %.3f) vis %.2f above %.2f "
+                    "sunPx (%.0f %.0f) rays %.2f",
                     in.dayFraction, in.lightIsMoon ? "moon" : "sun", in.toLight[0], in.toLight[1], in.toLight[2],
-                    toLightV[0], toLightV[1], toLightV[2], fog.lightVisibility, fog.lightAboveHorizon, sunPx[0],
-                    sunPx[1], rayStrength);
+                    toLightInView[0], toLightInView[1], toLightInView[2], fog.lightVisibility, fog.lightAboveHorizon,
+                    sunPx[0], sunPx[1], rayStrength);
         VF_LOG_INFO("  map %d fog %08X start %.1f end %.1f zone %.1f sun %08X direct %08X ambient %08X refZ %.1f "
                     "glow %.2f",
                     in.mapId, in.fogColor, in.fogStart, in.fogEnd, in.zoneFogDistance, in.sunColor, in.directColor,
@@ -606,7 +674,7 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
     SetTarget(dev, m_marchTarget);
     dev->SetPixelShader(m_march[std::clamp(cfg.quality, 1, 3) - 1]);
     const Float4 march[3] = {
-        {toLightV[0], toLightV[1], toLightV[2], fog.shadowLight},
+        {toLightInView[0], toLightInView[1], toLightInView[2], fog.shadowLight},
         {kShadowMinStep, kShadowStepPerYard,
          cfg.lightShafts && (fog.authored ? fog.lightAboveHorizon : fog.lightVisibility) > 0.001f ? 1.0f : 0.0f,
          kShadowThicknessSteps},
@@ -632,8 +700,7 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
     if (rays)
     {
         IDirect3DSurface9* raySurface = nullptr;
-        RECT world = {static_cast<LONG>(vp.X), static_cast<LONG>(vp.Y), static_cast<LONG>(vp.X + vp.Width),
-                      static_cast<LONG>(vp.Y + vp.Height)};
+        const RECT world = ViewportRect(vp);
         if (SUCCEEDED(m_rays[0]->GetSurfaceLevel(0, &raySurface)))
         {
             dev->StretchRect(target, &world, raySurface, nullptr, D3DTEXF_LINEAR);
@@ -642,7 +709,7 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
         SetTarget(dev, m_rays[1]);
         dev->SetPixelShader(m_rayMask);
         const Float4 mask[2] = {
-            {toLightV[0], toLightV[1], toLightV[2], kRayFalloff},
+            {toLightInView[0], toLightInView[1], toLightInView[2], kRayFalloff},
             {static_cast<float>(vp.Width) / rayW, kRayThreshold, 1.0f / rayW, 1.0f / rayH},
         };
         dev->SetPixelShaderConstantF(9, &mask[0].x, 2);
@@ -670,27 +737,18 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
         }
     }
 
-    // Linear light blends over a copy of the world viewport in the shader; gamma mode, or no copy, blends
-    // in fixed function.
-    RECT world = {static_cast<LONG>(vp.X), static_cast<LONG>(vp.Y), static_cast<LONG>(vp.X + vp.Width),
-                  static_cast<LONG>(vp.Y + vp.Height)};
-    bool sceneBlend = false;
-    if (fog.linear && EnsureSceneCopy(dev, target, vp.Width, vp.Height))
-    {
-        IDirect3DSurface9* sceneSurface = nullptr;
-        sceneBlend = SUCCEEDED(m_scene->GetSurfaceLevel(0, &sceneSurface)) &&
-                     SUCCEEDED(dev->StretchRect(target, &world, sceneSurface, nullptr, D3DTEXF_POINT));
-        SafeRelease(sceneSurface);
-    }
-    const float blendMode = !fog.linear ? 0.0f : (sceneBlend ? 1.0f : 2.0f);
+    FogBlend blend = FogBlend::GammaFixedFunction;
+    if (fog.linear)
+        blend = CopyWorldViewport(dev, target, vp) ? FogBlend::LinearOverSceneCopy : FogBlend::LinearFixedFunction;
+    const bool sceneBlend = blend == FogBlend::LinearOverSceneCopy;
+    const float blendMode = static_cast<float>(blend);
     if (blendMode != m_loggedBlendMode)
     {
         m_loggedBlendMode = blendMode;
-        static const char* const kBlendNames[] = {"gamma, fixed function", "linear over a scene copy",
-                                                  "linear, fixed function (no scene copy)"};
-        VF_LOG_INFO("fog blend: %s", kBlendNames[static_cast<int>(blendMode)]);
+        VF_LOG_INFO("fog blend: %s", FogBlendName(blend));
     }
 
+    const RECT world = ViewportRect(vp);
     dev->SetRenderTarget(0, target);
     dev->SetViewport(&vp);
     dev->SetScissorRect(&world);
@@ -703,8 +761,8 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
                         D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE);
     dev->SetPixelShader(m_composite);
     const Float4 composite[3] = {
-        {fog.authored ? cfg.classicExposure : cfg.exposure, rays ? rayStrength : 0.0f, static_cast<float>(cfg.debugView),
-         blendMode},
+        {fog.authored ? cfg.classicExposure : cfg.exposure, rays ? rayStrength : 0.0f,
+         static_cast<float>(cfg.debugView), blendMode},
         {fog.rayColor[0], fog.rayColor[1], fog.rayColor[2], 0.0f},
         {sunPx[0], sunPx[1], cfg.sunMarker && sunInFront ? 1.0f : 0.0f,
          cfg.glowCompensation && sceneBlend ? in.glow : 0.0f},
@@ -713,21 +771,17 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
     BindTexture(dev, 0, depthTexture, false);
     BindTexture(dev, 1, m_history[write], false);
     BindTexture(dev, 2, m_rays[1], true);
-    BindTexture(dev, 3, sceneBlend ? m_scene : nullptr, false);
+    BindTexture(dev, 3, sceneBlend ? m_sceneCopy : nullptr, false);
     DrawFullscreen(dev);
 
-    // The readback waits for the GPU, so the default log level takes only a few probes per session.
-    const bool debugLog = LogEnabled(LogLevel::Debug);
-    if (LogEnabled(LogLevel::Info) && !m_probeFailed && m_frame >= kProbeFirstFrame &&
-        (debugLog || m_probeAttempts < kProbeInfoLimit) &&
-        (m_probeAttempts == 0 || TickSeconds(now - m_probeTicks) > (debugLog ? kProbeDebugSeconds : kProbeSeconds)))
+    if (DepthProbeDue(now))
     {
         m_probeTicks = now;
         ++m_probeAttempts;
-        LogProbe(dev, depthTexture, m_history[write], vp, worldDepthLimit, in.dayFraction);
+        LogDepthProbe(dev, depthTexture, m_history[write], vp, worldDepth.deepest, in.dayFraction);
     }
 
-    std::memcpy(m_prevView, viewAbs, sizeof(m_prevView));
+    std::memcpy(m_prevWorldToView, worldToView, sizeof(m_prevWorldToView));
     std::memcpy(m_prevProj, in.proj, sizeof(m_prevProj));
     std::memcpy(m_prevCam, in.camPos, sizeof(m_prevCam));
     m_prevViewport = vp;

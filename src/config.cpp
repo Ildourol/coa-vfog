@@ -89,7 +89,7 @@ void ConfigStore::Read()
     c.glowCompensation = ReadInt(p, "GlowCompensation", 1, 0, 1) != 0;
     c.farClipMax = ReadFloat(p, "FarClipMax", c.farClipMax, 0.0f, kEngineFarClipMax);
     if (c.farClipMax < kEngineFarClipMin)
-        c.farClipMax = 0.0f;
+        c.farClipMax = kFarClipMaxKeepsClientCap;
     c.maxDistance = ReadFloat(p, "MaxDistance", c.maxDistance, 200.0f, 5000.0f);
     c.temporal = ReadFloat(p, "Temporal", c.temporal, 0.0f, 0.97f);
     c.underwater = ReadInt(p, "Underwater", 0, 0, 1) != 0;
