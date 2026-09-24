@@ -76,7 +76,8 @@ add_custom_command(TARGET CoAVolFog POST_BUILD
 
 enable_testing()
 add_test(NAME vfog_harness
-    COMMAND vfog_harness --out ${CMAKE_CURRENT_BINARY_DIR}/harness-out --data ${CMAKE_CURRENT_SOURCE_DIR}/data/fogdata.bin
+    COMMAND vfog_harness --out ${CMAKE_CURRENT_BINARY_DIR}/harness-out
+            --data ${CMAKE_CURRENT_SOURCE_DIR}/data/fogdata.bin
     WORKING_DIRECTORY $<TARGET_FILE_DIR:vfog_harness>)
 
 find_package(Python3 COMPONENTS Interpreter)
