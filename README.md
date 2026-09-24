@@ -25,10 +25,11 @@ slot a screen effect forces (the ghost effect forces slot 4, death), otherwise c
 blended toward storm (slot 2) by the client's storm weight. The DLL interpolates the two time keys around
 the current time and pairs layers by their Classic layer index; a layer only one side has keeps its
 colours and shape and has its density scaled by that side's weight. Each time key also keeps Classic's direct
-light colour, blended the same way; the fog's sun scattering is scaled by the client's direct light luminance
-over Classic's (at most 1). 3.3.5 storms are lit far darker than Classic's (at 20:00 in Goldshire the ratio is
-0.41), so the storm fog no longer glows like a Classic storm in front of a grey scene; at the harbour sunset
-it is 0.90. Then it applies the Classic transforms:
+light colour, blended the same way. In a storm the fog's sun scattering is scaled toward the client's direct
+light luminance over Classic's (at most 1, weighted by the storm weight): 3.3.5 storms are lit far darker than
+Classic's (0.41 at 20:00 in Goldshire), so the storm fog no longer glows like a Classic storm in front of a grey
+scene. Clear weather keeps the authored scattering, which zones like Duskwood rely on although their client
+light is darker than Classic's (0.34 at Darkshire at 18:00). Then it applies the Classic transforms:
 density ×0.01, heights relative to the player when flag bit 1 is set, sun shadowing for flag bit 0
 (a light below the horizon counts as shadow), `1 + strength·((d − start)/range)^exponent` over a 5,000-yd
 fog range, and scatter intensities up to 10 in linear light. The fog is blended over the scene in linear

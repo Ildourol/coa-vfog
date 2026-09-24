@@ -252,6 +252,12 @@ bool HaloHue(const AuthoredFog& fog, float* displayReferredRgb)
     return true;
 }
 
+float WeatherStormWeight(const LightParamsSelection& selection)
+{
+    return selection.screenEffectSlot == kNoScreenEffectLightSlot ? std::clamp(selection.stormBlend, 0.0f, 1.0f)
+                                                                   : 0.0f;
+}
+
 float ClientToClassicDirectLight(const AuthoredFog& fog, const float* clientDirectLight, bool linear)
 {
     if (!fog.hasClassicDirectLight)
@@ -302,7 +308,8 @@ FogParams BuildFogParams(const FrameInputs& in, const Config& cfg, const Authore
     p.directLightMatch = 1.0f;
     if (p.authored)
     {
-        p.directLightMatch = ClientToClassicDirectLight(*authored, p.lightColor, p.linear);
+        const float stormLightMatch = ClientToClassicDirectLight(*authored, p.lightColor, p.linear);
+        p.directLightMatch = 1.0f + (stormLightMatch - 1.0f) * WeatherStormWeight(in.lightParams);
         AuthoredLayers(*authored, cfg, p, cfg.sunScatter * p.directLightMatch, p.layers);
         HaloHue(*authored, p.rayColor);
         DistanceLayer(in, cfg, p, elevationFadedScatter, fogColor, distanceFog);

@@ -754,10 +754,11 @@ void CheckStormFogFollowsClientDirectLight(const FogData& data)
     constexpr uint32_t kWhiteDirectLight = 0xFFFFFFFF;
     FrameInputs storm = ContinentFrame(kEasternKingdoms, goldshire, eightPm, lowSun, false);
     storm.directColor = kClientStormDirectLight;
+    storm.lightParams = Storm(1.0f);
     FrameInputs bright = storm;
     bright.directColor = kWhiteDirectLight;
     AuthoredFog fog = {};
-    bool resolved = data.Resolve(kEasternKingdoms, storm.camPos, eightPm, Storm(1.0f), fog);
+    bool resolved = data.Resolve(kEasternKingdoms, storm.camPos, eightPm, storm.lightParams, fog);
     FogParams dim = BuildFogParams(storm, cfg, &fog);
     FogParams full = BuildFogParams(bright, cfg, &fog);
     const float diffuseRatio = dim.layers[2].diffuse[0] / std::fmax(full.layers[2].diffuse[0], 1e-6f);
@@ -768,6 +769,20 @@ void CheckStormFogFollowsClientDirectLight(const FogData& data)
               Near(diffuseRatio, dim.directLightMatch),
           "storm fog scatters the client's dimmer storm sunlight, not Classic's");
     Check(full.directLightMatch == 1.0f, "a client direct light brighter than Classic's never brightens the fog");
+
+    const Vec3 darkshire = {-10559.2f, -1196.6f, 28.3f};
+    const float sixPm = 0.7511f;
+    const Vec3 eveningSun = {0.641f, 0.641f, 0.423f};
+    constexpr uint32_t kClientDuskwoodDirectLight = 0xFF344A5C;
+    FrameInputs clearDuskwood = ContinentFrame(kEasternKingdoms, darkshire, sixPm, eveningSun, false);
+    clearDuskwood.directColor = kClientDuskwoodDirectLight;
+    AuthoredFog duskwoodFog = {};
+    bool duskwoodResolved =
+        data.Resolve(kEasternKingdoms, clearDuskwood.camPos, sixPm, clearDuskwood.lightParams, duskwoodFog);
+    FogParams duskwood = BuildFogParams(clearDuskwood, cfg, &duskwoodFog);
+    std::printf("     Darkshire clear 18:00: direct light match %.2f\n", duskwood.directLightMatch);
+    Check(duskwoodResolved && duskwood.directLightMatch == 1.0f,
+          "clear weather keeps Classic's authored sun scattering where the client's light is darker");
 }
 
 void CheckDenseClassicFogAtHarbourSunset(const FogData& data)
