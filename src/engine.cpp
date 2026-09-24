@@ -52,6 +52,8 @@ constexpr uintptr_t kSunPosition = 0x00D38E28;
 constexpr uintptr_t kMoonPosition = 0x00D38E48;
 constexpr uintptr_t kSunDayEnd = 0x00A41CA0;
 constexpr uintptr_t kSunDayStart = 0x00A41CA4;
+constexpr uintptr_t kDayNightScreenEffectLightSlot = 0x00D38B58;
+constexpr uintptr_t kDayNightStormBlend = 0x00D38B88;
 
 struct OpaqueState
 {
@@ -168,6 +170,17 @@ float GlowScreenEffectAmount()
     return std::clamp(glow, 0.0f, 1.0f);
 }
 
+LightParamsSelection ReadLightParamsSelection()
+{
+    LightParamsSelection selection;
+    const float storm = Read<float>(kDayNightStormBlend);
+    selection.stormBlend = std::isfinite(storm) ? std::clamp(storm, 0.0f, 1.0f) : 0.0f;
+    const int32_t slot = Read<int32_t>(kDayNightScreenEffectLightSlot);
+    if (slot >= 0 && slot < FogData::kLightParamsSlots)
+        selection.screenEffectSlot = slot;
+    return selection;
+}
+
 bool BuildFrameInputsUnsafe(FrameInputs& out)
 {
     std::memcpy(out.cameraRelativeView, g_opaque.cameraRelativeView, sizeof(out.cameraRelativeView));
@@ -197,6 +210,7 @@ bool BuildFrameInputsUnsafe(FrameInputs& out)
     out.ambientColor = Read<uint32_t>(kAmbientColor);
     out.inLiquid = CameraInLiquid();
     out.mapId = Read<int32_t>(kCurrentMap);
+    out.lightParams = ReadLightParamsSelection();
 
     out.zoneFogDistance = Read<float>(kZoneFogDistance);
     out.clientGlowAmount = out.inLiquid ? 0.0f : GlowScreenEffectAmount();

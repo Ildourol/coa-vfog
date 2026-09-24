@@ -6,13 +6,15 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 namespace
 {
 constexpr char kFileMagic[4] = {'V', 'F', 'D', '1'};
-constexpr uint32_t kFormatVersion = 1;
+constexpr uint32_t kFormatVersion = 3;
 constexpr float kHalfMinutesPerDay = 2880.0f;
-constexpr uint32_t kClearWeatherSlot = 0;
+constexpr uint32_t kMinimumOutlinePoints = 3;
+constexpr uint32_t kClientSelectedLayerFlag = 0x8;
 
 struct Header
 {
@@ -22,6 +24,8 @@ struct Header
     uint32_t paramsCount;
     uint32_t keyCount;
     uint32_t layerCount;
+    uint32_t zoneLightCount;
+    uint32_t zonePointCount;
 };
 
 template <typename T>
@@ -36,26 +40,6 @@ void UnpackRgb(uint32_t rgb, float* out)
     out[0] = static_cast<float>((rgb >> 16) & 0xFF) / 255.0f;
     out[1] = static_cast<float>((rgb >> 8) & 0xFF) / 255.0f;
     out[2] = static_cast<float>(rgb & 0xFF) / 255.0f;
-}
-
-void Lerp3(const float* a, const float* b, float t, float* out)
-{
-    for (int i = 0; i < 3; ++i)
-        out[i] = a[i] + (b[i] - a[i]) * t;
-}
-
-float Lerp(float a, float b, float t)
-{
-    return a + (b - a) * t;
-}
-
-void LerpPackedRgb(uint32_t a, uint32_t b, float t, float* out)
-{
-    float rgbA[3];
-    float rgbB[3];
-    UnpackRgb(a, rgbA);
-    UnpackRgb(b, rgbB);
-    Lerp3(rgbA, rgbB, t, out);
 }
 
 void AddScaled(AuthoredLayer& acc, const AuthoredLayer& l, float w)
@@ -77,11 +61,106 @@ void AddScaled(AuthoredLayer& acc, const AuthoredLayer& l, float w)
     acc.g += l.g * w;
     acc.strength += l.strength * w;
     acc.exponent += l.exponent * w;
-    acc.flags |= l.flags;
+}
+
+class LayerBlend
+{
+public:
+    void Add(const AuthoredLayer& layer, float weight)
+    {
+        if (!(layer.flags & kClientSelectedLayerFlag) || layer.density <= 0.0f || weight <= 0.0f)
+            return;
+        AddScaled(m_sum, layer, weight);
+        m_presence += weight;
+        if (weight > m_dominantWeight)
+        {
+            m_dominantWeight = weight;
+            m_dominantFlags = layer.flags;
+        }
+    }
+
+    AuthoredLayer Result() const
+    {
+        AuthoredLayer out = {};
+        if (m_presence <= 0.0f)
+            return out;
+        AddScaled(out, m_sum, 1.0f / m_presence);
+        out.density = m_sum.density;
+        out.flags = m_dominantFlags;
+        return out;
+    }
+
+private:
+    AuthoredLayer m_sum = {};
+    float m_presence = 0.0f;
+    float m_dominantWeight = 0.0f;
+    uint32_t m_dominantFlags = 0;
+};
+
+class DirectLightBlend
+{
+public:
+    void Add(const float* rgb, float presence, float weight)
+    {
+        const float w = presence * weight;
+        if (w <= 0.0f)
+            return;
+        for (int i = 0; i < 3; ++i)
+            m_sum[i] += rgb[i] * w;
+        m_presence += w;
+    }
+
+    float Presence() const { return m_presence; }
+
+    void Result(float* rgb) const
+    {
+        for (int i = 0; i < 3; ++i)
+            rgb[i] = m_presence > 0.0f ? m_sum[i] / m_presence : 0.0f;
+    }
+
+private:
+    float m_sum[3] = {};
+    float m_presence = 0.0f;
+};
+
+float SquaredDistanceToSegment(float px, float py, float ax, float ay, float bx, float by)
+{
+    const float ex = bx - ax;
+    const float ey = by - ay;
+    const float lengthSq = ex * ex + ey * ey;
+    const float t = lengthSq > 0.0f ? std::clamp(((px - ax) * ex + (py - ay) * ey) / lengthSq, 0.0f, 1.0f) : 0.0f;
+    const float dx = px - (ax + ex * t);
+    const float dy = py - (ay + ey * t);
+    return dx * dx + dy * dy;
+}
+
+bool CrossesRayToPositiveX(float px, float py, float ax, float ay, float bx, float by)
+{
+    return (ay > py) != (by > py) && px < (bx - ax) * (py - ay) / (by - ay) + ax;
 }
 }
 
-static_assert(sizeof(Header) == 24, "fogdata header");
+static_assert(sizeof(Header) == 32, "fogdata header");
+
+void FogData::LightBlend::Add(const Light* light, float weight)
+{
+    if (weight <= 0.0f)
+        return;
+    for (int i = 0; i < count; ++i)
+        if (lights[i].light == light)
+        {
+            lights[i].weight += weight;
+            return;
+        }
+    if (count < kMaxBlendedLights)
+        lights[count++] = {light, weight};
+}
+
+void FogData::LightBlend::Scale(float factor)
+{
+    for (int i = 0; i < count; ++i)
+        lights[i].weight *= factor;
+}
 
 bool FogData::Load(const std::string& path)
 {
@@ -96,21 +175,69 @@ bool FogData::Load(const std::string& path)
     bool ok = std::fread(&h, sizeof(h), 1, f) == 1 && std::memcmp(h.magic, kFileMagic, sizeof(kFileMagic)) == 0 &&
               h.version == kFormatVersion && ReadArray(f, m_lights, h.lightCount) &&
               ReadArray(f, m_params, h.paramsCount) && ReadArray(f, m_keys, h.keyCount) &&
-              ReadArray(f, m_layers, h.layerCount);
+              ReadArray(f, m_layers, h.layerCount) && ReadArray(f, m_zoneLights, h.zoneLightCount) &&
+              ReadArray(f, m_zonePoints, h.zonePointCount);
     std::fclose(f);
     for (const Params& p : m_params)
         ok = ok && p.firstKey + p.keyCount <= m_keys.size();
     for (const Key& k : m_keys)
         ok = ok && k.firstLayer + k.layerCount <= m_layers.size() && k.halfMinuteOfDay < kHalfMinutesPerDay;
+    ok = ok && BuildZoneOutlines();
     if (!ok)
     {
         VF_LOG_ERROR("Classic fog data %s is invalid; derived layers only", path.c_str());
         m_lights.clear();
+        m_zonesLargestFirst.clear();
         return false;
     }
-    VF_LOG_INFO("Classic fog data: %u lights, %u light params, %u keys, %u layers", h.lightCount, h.paramsCount,
-                h.keyCount, h.layerCount);
+    CollectMapsWithFog();
+    VF_LOG_INFO("Classic fog data: %u lights, %u light params, %u keys, %u layers, %u zone lights", h.lightCount,
+                h.paramsCount, h.keyCount, h.layerCount, h.zoneLightCount);
     return true;
+}
+
+bool FogData::BuildZoneOutlines()
+{
+    m_zonesLargestFirst.clear();
+    for (const ZoneLight& zone : m_zoneLights)
+    {
+        const Light* light = FindLight(zone.lightId);
+        if (!light || zone.pointCount < kMinimumOutlinePoints ||
+            zone.firstPoint + zone.pointCount > m_zonePoints.size())
+            return false;
+        m_zonesLargestFirst.push_back({&zone, light, EnclosedArea(zone)});
+    }
+    std::stable_sort(m_zonesLargestFirst.begin(), m_zonesLargestFirst.end(),
+                     [](const ZoneOutline& a, const ZoneOutline& b) { return a.area > b.area; });
+    return true;
+}
+
+float FogData::EnclosedArea(const ZoneLight& zone) const
+{
+    const ZonePoint* points = &m_zonePoints[zone.firstPoint];
+    double twiceArea = 0.0;
+    for (uint32_t i = 0, j = zone.pointCount - 1; i < zone.pointCount; j = i++)
+        twiceArea += static_cast<double>(points[j].x) * points[i].y - static_cast<double>(points[i].x) * points[j].y;
+    return static_cast<float>(std::fabs(twiceArea) * 0.5);
+}
+
+float FogData::ZoneWeight(const ZoneLight& zone, const float* position) const
+{
+    if (position[2] < zone.zMin || position[2] > zone.zMax)
+        return 0.0f;
+    const ZonePoint* points = &m_zonePoints[zone.firstPoint];
+    bool inside = false;
+    float nearestEdgeSq = std::numeric_limits<float>::max();
+    for (uint32_t i = 0, j = zone.pointCount - 1; i < zone.pointCount; j = i++)
+    {
+        const ZonePoint& a = points[j];
+        const ZonePoint& b = points[i];
+        if (CrossesRayToPositiveX(position[0], position[1], a.x, a.y, b.x, b.y))
+            inside = !inside;
+        nearestEdgeSq =
+            std::min(nearestEdgeSq, SquaredDistanceToSegment(position[0], position[1], a.x, a.y, b.x, b.y));
+    }
+    return inside ? std::min(std::sqrt(nearestEdgeSq) / kZoneLightEdgeFade, 1.0f) : 0.0f;
 }
 
 bool FogData::IsMapWide(const Light& light)
@@ -131,6 +258,14 @@ float FogData::SphereWeight(const Light& light, const float* position)
     return 0.0f;
 }
 
+const FogData::Light* FogData::FindLight(uint32_t id) const
+{
+    for (const Light& light : m_lights)
+        if (light.id == id)
+            return &light;
+    return nullptr;
+}
+
 const FogData::Params* FogData::FindParams(uint32_t id) const
 {
     auto it = std::lower_bound(m_params.begin(), m_params.end(), id,
@@ -138,19 +273,13 @@ const FogData::Params* FogData::FindParams(uint32_t id) const
     return it != m_params.end() && it->id == id ? &*it : nullptr;
 }
 
-const FogData::Params* FogData::SlotParams(const Light& light, int lightParamsSlot) const
+FogData::ConditionFog FogData::InterpolateKeys(const Params& params, float halfMinuteOfDay) const
 {
-    const bool slotInRange = lightParamsSlot >= 0 && lightParamsSlot < kLightParamsSlots;
-    const Params* params = FindParams(slotInRange ? light.paramsBySlot[lightParamsSlot] : 0);
-    return params ? params : FindParams(light.paramsBySlot[kClearWeatherSlot]);
-}
-
-int FogData::InterpolateKeys(const Params& params, float halfMinuteOfDay, AuthoredLayer* out) const
-{
+    ConditionFog fog = {};
     const Key* keys = &m_keys[params.firstKey];
     const uint32_t count = params.keyCount;
     if (count == 0)
-        return 0;
+        return fog;
 
     uint32_t next = 0;
     while (next < count && keys[next].halfMinuteOfDay <= halfMinuteOfDay)
@@ -168,50 +297,91 @@ int FogData::InterpolateKeys(const Params& params, float halfMinuteOfDay, Author
 
     const Key& a = keys[prev];
     const Key& b = keys[next];
-    const int layerCount = std::min<int>(std::max(a.layerCount, b.layerCount), kMaxAuthoredLayers);
-    for (int i = 0; i < layerCount; ++i)
+    fog.layerCount = std::min<int>(std::max(a.layerCount, b.layerCount), kMaxAuthoredLayers);
+    for (int i = 0; i < fog.layerCount; ++i)
     {
-        static const Layer kAbsentLayer = {};
-        const bool hasA = i < a.layerCount;
-        const bool hasB = i < b.layerCount;
-        const Layer& la = hasA ? m_layers[a.firstLayer + i] : kAbsentLayer;
-        const Layer& lb = hasB ? m_layers[b.firstLayer + i] : kAbsentLayer;
-        AuthoredLayer& layer = out[i];
-        LerpPackedRgb(la.diffuseRgb, lb.diffuseRgb, fraction, layer.diffuse);
-        LerpPackedRgb(la.emissiveRgb, lb.emissiveRgb, fraction, layer.emissive);
-        LerpPackedRgb(la.shadowEmissiveRgb, lb.shadowEmissiveRgb, fraction, layer.shadowEmissive);
-        layer.start = Lerp(la.start, lb.start, fraction);
-        layer.density = Lerp(la.density, lb.density, fraction);
-        layer.shadowMultiplier = Lerp(la.shadowMultiplier, lb.shadowMultiplier, fraction);
-        layer.upperDensity = Lerp(la.upperDensity, lb.upperDensity, fraction);
-        layer.upperHeight = Lerp(la.upperHeight, lb.upperHeight, fraction);
-        layer.lowerDensity = Lerp(la.lowerDensity, lb.lowerDensity, fraction);
-        layer.lowerHeight = Lerp(la.lowerHeight, lb.lowerHeight, fraction);
-        layer.intensity = Lerp(la.intensity, lb.intensity, fraction);
-        layer.g = Lerp(la.g, lb.g, fraction);
-        layer.strength = Lerp(la.strength, lb.strength, fraction);
-        layer.exponent = Lerp(la.exponent, lb.exponent, fraction);
-        layer.flags = !hasB || (hasA && fraction < 0.5f) ? la.flags : lb.flags;
+        LayerBlend blend;
+        if (i < a.layerCount)
+            blend.Add(Unpack(m_layers[a.firstLayer + i]), 1.0f - fraction);
+        if (i < b.layerCount)
+            blend.Add(Unpack(m_layers[b.firstLayer + i]), fraction);
+        fog.layers[i] = blend.Result();
     }
-    return layerCount;
+    float directA[3];
+    float directB[3];
+    UnpackRgb(a.directRgb, directA);
+    UnpackRgb(b.directRgb, directB);
+    for (int i = 0; i < 3; ++i)
+        fog.directLight[i] = directA[i] + (directB[i] - directA[i]) * fraction;
+    fog.directLightPresence = 1.0f;
+    return fog;
 }
 
-bool FogData::Resolve(int mapId, const float* position, float dayFraction, int lightParamsSlot, AuthoredFog& out) const
+FogData::ConditionFog FogData::BlendConditions(const ConditionFog& a, const ConditionFog& b, float bWeight)
 {
-    std::memset(&out, 0, sizeof(out));
-    if (m_lights.empty() || mapId < 0)
-        return false;
-
-    struct Contribution
+    ConditionFog blended = {};
+    blended.layerCount = std::max(a.layerCount, b.layerCount);
+    for (int i = 0; i < blended.layerCount; ++i)
     {
-        const Light* light;
-        float weight;
-    };
+        LayerBlend blend;
+        blend.Add(a.layers[i], 1.0f - bWeight);
+        blend.Add(b.layers[i], bWeight);
+        blended.layers[i] = blend.Result();
+    }
+    DirectLightBlend direct;
+    direct.Add(a.directLight, a.directLightPresence, 1.0f - bWeight);
+    direct.Add(b.directLight, b.directLightPresence, bWeight);
+    direct.Result(blended.directLight);
+    blended.directLightPresence = direct.Presence();
+    return blended;
+}
+
+AuthoredLayer FogData::Unpack(const Layer& layer)
+{
+    AuthoredLayer out = {};
+    UnpackRgb(layer.diffuseRgb, out.diffuse);
+    UnpackRgb(layer.emissiveRgb, out.emissive);
+    UnpackRgb(layer.shadowEmissiveRgb, out.shadowEmissive);
+    out.start = layer.start;
+    out.density = layer.density;
+    out.shadowMultiplier = layer.shadowMultiplier;
+    out.upperDensity = layer.upperDensity;
+    out.upperHeight = layer.upperHeight;
+    out.lowerDensity = layer.lowerDensity;
+    out.lowerHeight = layer.lowerHeight;
+    out.intensity = layer.intensity;
+    out.g = layer.g;
+    out.strength = layer.strength;
+    out.exponent = layer.exponent;
+    out.flags = layer.flags;
+    return out;
+}
+
+FogData::ConditionFog FogData::LightConditionFog(const Light& light, float halfMinuteOfDay,
+                                                 const LightParamsSelection& selection) const
+{
+    const int effectSlot = selection.screenEffectSlot;
+    if (effectSlot >= 0 && effectSlot < kLightParamsSlots && light.paramsBySlot[effectSlot] != 0)
+    {
+        const Params* effect = FindParams(light.paramsBySlot[effectSlot]);
+        return effect ? InterpolateKeys(*effect, halfMinuteOfDay) : ConditionFog{};
+    }
+    const Params* clear = FindParams(light.paramsBySlot[kClearSlot]);
+    const ConditionFog clearFog = clear ? InterpolateKeys(*clear, halfMinuteOfDay) : ConditionFog{};
+    const float storm = std::clamp(selection.stormBlend, 0.0f, 1.0f);
+    if (storm <= 0.0f || light.paramsBySlot[kStormSlot] == 0)
+        return clearFog;
+    const Params* stormParams = FindParams(light.paramsBySlot[kStormSlot]);
+    const ConditionFog stormFog = stormParams ? InterpolateKeys(*stormParams, halfMinuteOfDay) : ConditionFog{};
+    return BlendConditions(clearFog, stormFog, storm);
+}
+
+FogData::LightBlend FogData::BlendLights(int mapId, const float* position) const
+{
     const auto byWeight = [](const Contribution& a, const Contribution& b) { return a.weight < b.weight; };
-    Contribution local[kMaxBlendedLights] = {};
-    int localCount = 0;
+    Contribution spheres[kMaxSphereLights] = {};
+    int sphereCount = 0;
     const Light* mapWide = nullptr;
-    float localWeight = 0.0f;
     for (const Light& light : m_lights)
     {
         if (light.mapId != mapId)
@@ -225,63 +395,102 @@ bool FogData::Resolve(int mapId, const float* position, float dayFraction, int l
         const float weight = SphereWeight(light, position);
         if (weight <= 0.0f)
             continue;
-        if (localCount < kMaxBlendedLights - 1)
-            local[localCount++] = {&light, weight};
+        if (sphereCount < kMaxSphereLights)
+            spheres[sphereCount++] = {&light, weight};
         else
         {
-            auto weakest = std::min_element(local, local + localCount, byWeight);
+            auto weakest = std::min_element(spheres, spheres + sphereCount, byWeight);
             if (weakest->weight < weight)
                 *weakest = {&light, weight};
         }
     }
-    for (int i = 0; i < localCount; ++i)
-        localWeight += local[i].weight;
-    if (localWeight > 1.0f)
-        for (int i = 0; i < localCount; ++i)
-            local[i].weight /= localWeight;
-    Contribution blended[kMaxBlendedLights] = {};
-    int blendedCount = 0;
-    for (int i = 0; i < localCount; ++i)
-        blended[blendedCount++] = local[i];
-    if (mapWide && localWeight < 1.0f)
-        blended[blendedCount++] = {mapWide, 1.0f - localWeight};
+    float sphereWeight = 0.0f;
+    for (int i = 0; i < sphereCount; ++i)
+        sphereWeight += spheres[i].weight;
+    const float sphereNormalization = sphereWeight > 1.0f ? 1.0f / sphereWeight : 1.0f;
+
+    LightBlend background = {};
+    if (mapWide)
+        background.Add(mapWide, 1.0f);
+    int nesting = 0;
+    for (const ZoneOutline& outline : m_zonesLargestFirst)
+    {
+        if (outline.zone->mapId != mapId || nesting == kMaxZoneLightNesting)
+            continue;
+        const float weight = ZoneWeight(*outline.zone, position);
+        if (weight <= 0.0f)
+            continue;
+        background.Scale(1.0f - weight);
+        background.Add(outline.light, weight);
+        ++nesting;
+    }
+    background.Scale(std::max(1.0f - sphereWeight * sphereNormalization, 0.0f));
+
+    LightBlend blend = {};
+    for (int i = 0; i < sphereCount; ++i)
+        blend.Add(spheres[i].light, spheres[i].weight * sphereNormalization);
+    for (int i = 0; i < background.count; ++i)
+        blend.Add(background.lights[i].light, background.lights[i].weight);
+    return blend;
+}
+
+bool FogData::Resolve(int mapId, const float* position, float dayFraction, const LightParamsSelection& selection,
+                      AuthoredFog& out) const
+{
+    std::memset(&out, 0, sizeof(out));
+    if (m_lights.empty() || mapId < 0)
+        return false;
+
+    if (!std::binary_search(m_mapsWithFog.begin(), m_mapsWithFog.end(), mapId))
+        return false;
+
+    const LightBlend blend = BlendLights(mapId, position);
+    float classicWeight = 0.0f;
+    for (int i = 0; i < blend.count; ++i)
+        classicWeight += blend.lights[i].weight;
+    if (classicWeight < kMinimumClassicCoverage)
+        return false;
 
     const float halfMinuteOfDay = std::fmod(std::max(dayFraction, 0.0f), 1.0f) * kHalfMinutesPerDay;
-    float fogLightWeight = 0.0f;
-    AuthoredLayer layersByLight[kMaxBlendedLights][kMaxAuthoredLayers] = {};
-    int layerCounts[kMaxBlendedLights] = {};
-    for (int i = 0; i < blendedCount; ++i)
+    LayerBlend layerBlends[kMaxAuthoredLayers];
+    DirectLightBlend directLight;
+    for (int i = 0; i < blend.count; ++i)
     {
-        const Light& light = *blended[i].light;
-        const Params* params = SlotParams(light, lightParamsSlot);
-        if (!params)
-            continue;
-        layerCounts[i] = InterpolateKeys(*params, halfMinuteOfDay, layersByLight[i]);
-        if (layerCounts[i] == 0)
-            continue;
-        fogLightWeight += blended[i].weight;
+        const Light& light = *blend.lights[i].light;
+        const float weight = blend.lights[i].weight / classicWeight;
+        const ConditionFog fog = LightConditionFog(light, halfMinuteOfDay, selection);
+        for (int j = 0; j < fog.layerCount; ++j)
+            layerBlends[j].Add(fog.layers[j], weight);
+        directLight.Add(fog.directLight, fog.directLightPresence, weight);
+        out.layerCount = std::max(out.layerCount, fog.layerCount);
         out.lightIds[out.lightCount] = light.id;
-        out.lightWeights[out.lightCount] = blended[i].weight;
+        out.lightWeights[out.lightCount] = weight;
         ++out.lightCount;
     }
-    if (fogLightWeight < kMinimumFogCoverage)
-    {
-        std::memset(&out, 0, sizeof(out));
-        return false;
-    }
-    out.coverage = fogLightWeight;
-    for (int i = 0; i < out.lightCount; ++i)
-        out.lightWeights[i] /= fogLightWeight;
-    for (int i = 0; i < blendedCount; ++i)
-    {
-        if (layerCounts[i] == 0)
-            continue;
-        const float weight = blended[i].weight / fogLightWeight;
-        for (int j = 0; j < layerCounts[i]; ++j)
-            AddScaled(out.layers[j], layersByLight[i][j], weight);
-        out.layerCount = std::max(out.layerCount, layerCounts[i]);
-    }
+    for (int j = 0; j < out.layerCount; ++j)
+        out.layers[j] = layerBlends[j].Result();
+    out.hasClassicDirectLight = directLight.Presence() > 0.0f;
+    directLight.Result(out.classicDirectLight);
+    out.coverage = classicWeight;
     return true;
+}
+
+bool FogData::HasFogInAnySlot(const Light& light) const
+{
+    for (uint32_t params : light.paramsBySlot)
+        if (params != 0 && FindParams(params))
+            return true;
+    return false;
+}
+
+void FogData::CollectMapsWithFog()
+{
+    m_mapsWithFog.clear();
+    for (const Light& light : m_lights)
+        if (HasFogInAnySlot(light))
+            m_mapsWithFog.push_back(light.mapId);
+    std::sort(m_mapsWithFog.begin(), m_mapsWithFog.end());
+    m_mapsWithFog.erase(std::unique(m_mapsWithFog.begin(), m_mapsWithFog.end()), m_mapsWithFog.end());
 }
 
 FogData& GlobalFogData()

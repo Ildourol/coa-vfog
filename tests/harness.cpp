@@ -557,7 +557,7 @@ float WeightOf(const AuthoredFog& fog, uint32_t light)
 constexpr int kEasternKingdoms = 0;
 constexpr int kKalimdor = 1;
 constexpr int kOutland = 530;
-constexpr int kClearWeatherSlot = 0;
+const LightParamsSelection kClearWeather = {};
 constexpr uint32_t kEasternKingdomsGlobalLight = 1;
 constexpr uint32_t kStormwindLight = 77;
 constexpr float kDayFraction1800 = 0.75f;
@@ -567,7 +567,7 @@ void CheckClassicData(const FogData& data)
 {
     const float harbourAtStormwindLightEdge[3] = {-8565.21f, 993.46f, 104.96f};
     AuthoredFog fog = {};
-    bool ok = data.Resolve(kEasternKingdoms, harbourAtStormwindLightEdge, kDayFraction1800, kClearWeatherSlot, fog);
+    bool ok = data.Resolve(kEasternKingdoms, harbourAtStormwindLightEdge, kDayFraction1800, kClearWeather, fog);
     float globalWeight = WeightOf(fog, kEasternKingdomsGlobalLight);
     float stormwindWeight = WeightOf(fog, kStormwindLight);
     const AuthoredLayer* wall = FarWall(fog);
@@ -584,7 +584,7 @@ void CheckClassicData(const FogData& data)
           "Classic layers blended by light weight at a key time");
 
     AuthoredFog mid = {};
-    data.Resolve(kEasternKingdoms, harbourAtStormwindLightEdge, kDayFraction1845, kClearWeatherSlot, mid);
+    data.Resolve(kEasternKingdoms, harbourAtStormwindLightEdge, kDayFraction1845, kClearWeather, mid);
     float expected = WeightOf(mid, kEasternKingdomsGlobalLight) * 0.8f + WeightOf(mid, kStormwindLight) * 0.3f;
     const AuthoredLayer* midWall = FarWall(mid);
     std::printf("     harbour at 18:45: far wall density %.4f (expected %.4f)\n", midWall ? midWall->density : -1.0f,
@@ -593,8 +593,106 @@ void CheckClassicData(const FogData& data)
           "Classic keys interpolated between 18:00 and 19:30");
 
     AuthoredFog none = {};
-    Check(!data.Resolve(kOutland, harbourAtStormwindLightEdge, kDayFraction1800, kClearWeatherSlot, none),
+    Check(!data.Resolve(kOutland, harbourAtStormwindLightEdge, kDayFraction1800, kClearWeather, none),
           "maps without Classic lights fall back to derived layers");
+}
+
+constexpr float kNoon = 0.5f;
+constexpr uint32_t kElwynnZoneLight = 16849;
+constexpr uint32_t kOrgrimmarDragZoneLight = 16845;
+constexpr uint32_t kOrgrimmarZoneLight = 239;
+constexpr int kUnusedLightParamsSlot = 6;
+const float kOpenSeaWestOfElwynn[3] = {-10500.0f, 2500.0f, 50.0f};
+
+bool Near(float a, float b)
+{
+    return std::fabs(a - b) < 1e-4f;
+}
+
+LightParamsSelection Storm(float blend)
+{
+    LightParamsSelection selection;
+    selection.stormBlend = blend;
+    return selection;
+}
+
+LightParamsSelection ScreenEffectSlot(int slot, float stormBlend)
+{
+    LightParamsSelection selection = Storm(stormBlend);
+    selection.screenEffectSlot = slot;
+    return selection;
+}
+
+void CheckStormBlendsLayersByClassicIndex(const FogData& data)
+{
+    AuthoredFog clear = {};
+    AuthoredFog storm = {};
+    AuthoredFog half = {};
+    bool resolved = data.Resolve(kEasternKingdoms, kOpenSeaWestOfElwynn, kNoon, kClearWeather, clear) &&
+                    data.Resolve(kEasternKingdoms, kOpenSeaWestOfElwynn, kNoon, Storm(1.0f), storm) &&
+                    data.Resolve(kEasternKingdoms, kOpenSeaWestOfElwynn, kNoon, Storm(0.5f), half);
+    std::printf("     open sea at noon, densities by Classic layer index: clear %.3f %.3f %.3f, storm %.3f %.3f %.3f, "
+                "half storm %.3f %.3f %.3f (far wall start %.0f)\n",
+                clear.layers[0].density, clear.layers[1].density, clear.layers[2].density, storm.layers[0].density,
+                storm.layers[1].density, storm.layers[2].density, half.layers[0].density, half.layers[1].density,
+                half.layers[2].density, half.layers[1].start);
+    Check(resolved && clear.lightCount == 1 && clear.lightIds[0] == kEasternKingdomsGlobalLight &&
+              Near(clear.layers[1].start, 3000.0f) && Near(clear.layers[1].density, 0.3f) &&
+              Near(clear.layers[2].density, 0.1f),
+          "open sea resolves only the Eastern Kingdoms light");
+    Check(storm.layerCount == 3 && storm.layers[0].density == 0.0f && Near(storm.layers[1].start, 800.0f) &&
+              Near(storm.layers[1].density, 0.75f) && Near(storm.layers[2].density, 0.75f),
+          "a full storm uses the storm layers at their Classic indices");
+    Check(Near(half.layers[0].density, 0.015f) && Near(half.layers[0].g, clear.layers[0].g) &&
+              Near(half.layers[1].start, 1900.0f) && Near(half.layers[1].density, 0.525f) &&
+              Near(half.layers[2].density, 0.425f),
+          "a half storm blends matching layers and thins the clear-only haze");
+}
+
+void CheckScreenEffectLightSlot(const FogData& data)
+{
+    AuthoredFog ghost = {};
+    AuthoredFog unused = {};
+    AuthoredFog clear = {};
+    const LightParamsSelection ghostDuringStorm = ScreenEffectSlot(FogData::kDeathSlot, 1.0f);
+    const LightParamsSelection unusedSlot = ScreenEffectSlot(kUnusedLightParamsSlot, 0.0f);
+    bool resolved = data.Resolve(kEasternKingdoms, kOpenSeaWestOfElwynn, kNoon, ghostDuringStorm, ghost) &&
+                    data.Resolve(kEasternKingdoms, kOpenSeaWestOfElwynn, kNoon, unusedSlot, unused) &&
+                    data.Resolve(kEasternKingdoms, kOpenSeaWestOfElwynn, kNoon, kClearWeather, clear);
+    std::printf("     ghost at noon: densities %.3f %.3f %.3f, start %.0f\n", ghost.layers[0].density,
+                ghost.layers[1].density, ghost.layers[2].density, ghost.layers[2].start);
+    Check(resolved && ghost.layerCount == 3 && ghost.layers[0].density == 0.0f && ghost.layers[1].density == 0.0f &&
+              Near(ghost.layers[2].start, 75.0f) && Near(ghost.layers[2].density, 1.0f),
+          "the ghost screen effect selects the death slot over the storm");
+    Check(Near(unused.layers[1].density, clear.layers[1].density) &&
+              Near(unused.layers[2].density, clear.layers[2].density),
+          "a screen effect slot the light leaves empty keeps its weather layers");
+}
+
+void CheckZoneLights(const FogData& data)
+{
+    const float elwynnInterior[3] = {-9847.0f, 49.0f, 50.0f};
+    const float elwynnFiftyYardsInsideWestEdge[3] = {-9847.0f, 664.0f, 50.0f};
+    const float orgrimmarDragInsideOrgrimmar[3] = {1847.0f, -4499.0f, 20.0f};
+    AuthoredFog inside = {};
+    AuthoredFog edge = {};
+    AuthoredFog drag = {};
+    bool resolved = data.Resolve(kEasternKingdoms, elwynnInterior, kNoon, kClearWeather, inside) &&
+                    data.Resolve(kEasternKingdoms, elwynnFiftyYardsInsideWestEdge, kNoon, kClearWeather, edge) &&
+                    data.Resolve(kKalimdor, orgrimmarDragInsideOrgrimmar, kNoon, kClearWeather, drag);
+    const float edgeZoneWeight = WeightOf(edge, kElwynnZoneLight);
+    std::printf("     Elwynn zone light: interior %.2f (far wall %.2f), 50 yd inside the edge %.2f; Drag %.2f, "
+                "Orgrimmar %.2f\n",
+                WeightOf(inside, kElwynnZoneLight), inside.layers[1].density, edgeZoneWeight,
+                WeightOf(drag, kOrgrimmarDragZoneLight), WeightOf(drag, kOrgrimmarZoneLight));
+    Check(resolved && Near(WeightOf(inside, kElwynnZoneLight), 1.0f) &&
+              WeightOf(inside, kEasternKingdomsGlobalLight) == 0.0f && Near(inside.layers[1].density, 0.2f),
+          "inside its outline the Elwynn zone light replaces the Eastern Kingdoms light");
+    Check(edgeZoneWeight > 0.4f && edgeZoneWeight < 0.6f &&
+              Near(edgeZoneWeight + WeightOf(edge, kEasternKingdomsGlobalLight), 1.0f),
+          "a zone light fades in over 100 yd inside its outline");
+    Check(Near(WeightOf(drag, kOrgrimmarDragZoneLight), 1.0f) && WeightOf(drag, kOrgrimmarZoneLight) == 0.0f,
+          "the innermost of nested zone outlines wins");
 }
 
 float SunlitLevelRayOpacity(const FogParams& fog, float camZ, float distance)
@@ -646,12 +744,53 @@ FrameInputs ContinentFrame(int map, Vec3 eye, float dayFraction, Vec3 toLight, b
     return in;
 }
 
+void CheckStormFogFollowsClientDirectLight(const FogData& data)
+{
+    const Config cfg = {};
+    const Vec3 goldshire = {-9456.8f, 54.7f, 59.6f};
+    const float eightPm = 0.8337f;
+    const Vec3 lowSun = {0.704f, 0.704f, 0.086f};
+    constexpr uint32_t kClientStormDirectLight = 0xFF656565;
+    constexpr uint32_t kWhiteDirectLight = 0xFFFFFFFF;
+    FrameInputs storm = ContinentFrame(kEasternKingdoms, goldshire, eightPm, lowSun, false);
+    storm.directColor = kClientStormDirectLight;
+    storm.lightParams = Storm(1.0f);
+    FrameInputs bright = storm;
+    bright.directColor = kWhiteDirectLight;
+    AuthoredFog fog = {};
+    bool resolved = data.Resolve(kEasternKingdoms, storm.camPos, eightPm, storm.lightParams, fog);
+    FogParams dim = BuildFogParams(storm, cfg, &fog);
+    FogParams full = BuildFogParams(bright, cfg, &fog);
+    const float diffuseRatio = dim.layers[2].diffuse[0] / std::fmax(full.layers[2].diffuse[0], 1e-6f);
+    std::printf("     Goldshire storm 20:00: client direct light vs Classic %.2f (white light %.2f), "
+                "sun scatter %.2f -> %.2f\n",
+                dim.directLightMatch, full.directLightMatch, full.layers[2].diffuse[0], dim.layers[2].diffuse[0]);
+    Check(resolved && dim.directLightMatch > 0.35f && dim.directLightMatch < 0.47f &&
+              Near(diffuseRatio, dim.directLightMatch),
+          "storm fog scatters the client's dimmer storm sunlight, not Classic's");
+    Check(full.directLightMatch == 1.0f, "a client direct light brighter than Classic's never brightens the fog");
+
+    const Vec3 darkshire = {-10559.2f, -1196.6f, 28.3f};
+    const float sixPm = 0.7511f;
+    const Vec3 eveningSun = {0.641f, 0.641f, 0.423f};
+    constexpr uint32_t kClientDuskwoodDirectLight = 0xFF344A5C;
+    FrameInputs clearDuskwood = ContinentFrame(kEasternKingdoms, darkshire, sixPm, eveningSun, false);
+    clearDuskwood.directColor = kClientDuskwoodDirectLight;
+    AuthoredFog duskwoodFog = {};
+    bool duskwoodResolved =
+        data.Resolve(kEasternKingdoms, clearDuskwood.camPos, sixPm, clearDuskwood.lightParams, duskwoodFog);
+    FogParams duskwood = BuildFogParams(clearDuskwood, cfg, &duskwoodFog);
+    std::printf("     Darkshire clear 18:00: direct light match %.2f\n", duskwood.directLightMatch);
+    Check(duskwoodResolved && duskwood.directLightMatch == 1.0f,
+          "clear weather keeps Classic's authored sun scattering where the client's light is darker");
+}
+
 void CheckDenseClassicFogAtHarbourSunset(const FogData& data)
 {
     const Config cfg = {};
     FrameInputs harbour = ContinentFrame(kEasternKingdoms, kHarbourEye, kHarbourDayFraction, kHarbourToLight, false);
     AuthoredFog fog = {};
-    bool resolved = data.Resolve(kEasternKingdoms, harbour.camPos, harbour.dayFraction, kClearWeatherSlot, fog);
+    bool resolved = data.Resolve(kEasternKingdoms, harbour.camPos, harbour.dayFraction, kClearWeather, fog);
     FogParams p = BuildFogParams(harbour, cfg, resolved ? &fog : nullptr);
     float horizon = SunlitLevelRayOpacity(p, harbour.camPos[2], p.maxDistance);
     std::printf("     harbour 18:43: coverage %.2f, distance fog density %.6f, level-ray opacity %.3f\n", fog.coverage,
@@ -668,7 +807,7 @@ void CheckThinClassicFogAtHyjalMidnight(const FogData& data)
     const Vec3 toMoon = {0.63f, 0.63f, 0.455f};
     FrameInputs frame = ContinentFrame(kKalimdor, hyjal, midnight, toMoon, true);
     AuthoredFog fog = {};
-    bool resolved = data.Resolve(kKalimdor, frame.camPos, frame.dayFraction, kClearWeatherSlot, fog);
+    bool resolved = data.Resolve(kKalimdor, frame.camPos, frame.dayFraction, kClearWeather, fog);
     FogParams p = BuildFogParams(frame, cfg, resolved ? &fog : nullptr);
     float horizon = SunlitLevelRayOpacity(p, frame.camPos[2], p.maxDistance);
     std::printf("     Hyjal 00:00: coverage %.2f, distance fog density %.6f, level-ray opacity %.3f\n", fog.coverage,
@@ -677,28 +816,46 @@ void CheckThinClassicFogAtHyjalMidnight(const FogData& data)
           "thin Classic layers keep enough distance fog to hide the far clip");
 }
 
-void CheckDistanceFogAcrossClassicCoverageEdge(const FogData& data)
+constexpr uint32_t kFoglessBlastedLandsLight = 19;
+
+float SceneLayersDensity(const FogParams& p)
+{
+    float density = 0.0f;
+    for (int i = 0; i < kSceneLayers; ++i)
+        density += p.layers[i].density;
+    return density;
+}
+
+void CheckFogThinsIntoFoglessClassicLight(const FogData& data)
 {
     const Config cfg = {};
     const Vec3 foglessBlastedLandsLight19 = {-12041.6f, -2450.3f, 0.0f};
     const float afterNoon = 0.5212f;
     const Vec3 toSun = {0.106f, 0.106f, 0.989f};
-    FrameInputs inside =
-        ContinentFrame(kEasternKingdoms, Add(foglessBlastedLandsLight19, {0, -455.0f, 20.0f}), afterNoon, toSun, false);
-    FrameInputs outside =
-        ContinentFrame(kEasternKingdoms, Add(foglessBlastedLandsLight19, {0, -465.0f, 20.0f}), afterNoon, toSun, false);
-    AuthoredFog in19 = {};
-    AuthoredFog out19 = {};
-    bool derivedSide = !data.Resolve(kEasternKingdoms, inside.camPos, inside.dayFraction, kClearWeatherSlot, in19);
-    bool classicSide = data.Resolve(kEasternKingdoms, outside.camPos, outside.dayFraction, kClearWeatherSlot, out19);
-    FogParams pin = BuildFogParams(inside, cfg, nullptr);
-    FogParams pout = BuildFogParams(outside, cfg, classicSide ? &out19 : nullptr);
-    float oin = SunlitLevelRayOpacity(pin, inside.camPos[2], 450.0f);
-    float oout = SunlitLevelRayOpacity(pout, outside.camPos[2], 450.0f);
-    std::printf("     light 19 edge at noon: derived %.3f, Classic (coverage %.2f) %.3f opacity at 450 yd\n", oin,
-                out19.coverage, oout);
-    Check(derivedSide && classicSide && std::fabs(oin - oout) < 0.08f,
-          "distance fog does not jump where Classic coverage ends");
+    const float offsets[] = {0.0f, -455.0f, -465.0f};
+    FrameInputs frames[3];
+    AuthoredFog fogs[3] = {};
+    FogParams params[3];
+    bool resolved = true;
+    for (int i = 0; i < 3; ++i)
+    {
+        frames[i] = ContinentFrame(kEasternKingdoms, Add(foglessBlastedLandsLight19, {0, offsets[i], 20.0f}),
+                                   afterNoon, toSun, false);
+        resolved = data.Resolve(kEasternKingdoms, frames[i].camPos, afterNoon, kClearWeather, fogs[i]) && resolved;
+        params[i] = BuildFogParams(frames[i], cfg, &fogs[i]);
+    }
+    const float innerOpacity = SunlitLevelRayOpacity(params[1], frames[1].camPos[2], 450.0f);
+    const float outerOpacity = SunlitLevelRayOpacity(params[2], frames[2].camPos[2], 450.0f);
+    std::printf("     light 19 at noon: centre scene density %.6f, distance fog %.6f; light 19 weight %.2f / %.2f, "
+                "opacity at 450 yd %.3f / %.3f\n",
+                SceneLayersDensity(params[0]), params[0].layers[kDistanceFogLayer].density,
+                WeightOf(fogs[1], kFoglessBlastedLandsLight), WeightOf(fogs[2], kFoglessBlastedLandsLight),
+                innerOpacity, outerOpacity);
+    Check(resolved && std::fabs(innerOpacity - outerOpacity) < 0.08f,
+          "fog thins continuously into a Classic light without fog");
+    Check(Near(WeightOf(fogs[0], kFoglessBlastedLandsLight), 1.0f) && SceneLayersDensity(params[0]) == 0.0f &&
+              params[0].layers[kDistanceFogLayer].density > 0.0f,
+          "inside a Classic light without fog only the distance fog hides the far clip");
 }
 
 float BoxMean7x7(const Image& img, UINT cx, UINT cy, int ch)
@@ -878,9 +1035,13 @@ int Run(const std::wstring& outDir, const std::string& dataPath)
     FogData classic;
     Check(classic.Load(dataPath), "Classic fog data loads");
     CheckClassicData(classic);
+    CheckStormBlendsLayersByClassicIndex(classic);
+    CheckScreenEffectLightSlot(classic);
+    CheckZoneLights(classic);
+    CheckStormFogFollowsClientDirectLight(classic);
     CheckDenseClassicFogAtHarbourSunset(classic);
     CheckThinClassicFogAtHyjalMidnight(classic);
-    CheckDistanceFogAcrossClassicCoverageEdge(classic);
+    CheckFogThinsIntoFoglessClassicLight(classic);
 
     CreateDirectoryW(outDir.c_str(), nullptr);
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -1156,7 +1317,7 @@ int Run(const std::wstring& outDir, const std::string& dataPath)
         FrameInputs in = MakeInputs(view, proj, eye, at, world);
         in.mapId = kEasternKingdoms;
         AuthoredFog authored = {};
-        bool resolved = classic.Resolve(kEasternKingdoms, in.camPos, in.dayFraction, kClearWeatherSlot, authored);
+        bool resolved = classic.Resolve(kEasternKingdoms, in.camPos, in.dayFraction, kClearWeather, authored);
         c.debugView = 2;
         vf_test_set_config(&c);
         h.BeginFrame();
@@ -1639,7 +1800,7 @@ int RunHarbour(const std::wstring& outDir, const std::string& dataPath)
         CameraRelativeLookAt(kHarbourEye, at, view);
         FrameInputs in = inputsFor(view, at);
         AuthoredFog authored = {};
-        bool resolved = classic.Resolve(kEasternKingdoms, in.camPos, in.dayFraction, kClearWeatherSlot, authored);
+        bool resolved = classic.Resolve(kEasternKingdoms, in.camPos, in.dayFraction, kClearWeather, authored);
         std::printf("harbour frame: camera (%.1f %.1f %.1f), day %.4f, toLight (%.3f %.3f %.3f) = azimuth %.1f "
                     "elevation %.2f deg\n",
                     in.camPos[0], in.camPos[1], in.camPos[2], in.dayFraction, toLight.x, toLight.y, toLight.z, sunAz,
@@ -1731,7 +1892,7 @@ int RunHarbour(const std::wstring& outDir, const std::string& dataPath)
         SavePng(stem + L"-depth.png", depth.w, depth.h, depth.bgra);
 
         AuthoredFog authored = {};
-        bool resolved = classic.Resolve(kEasternKingdoms, in.camPos, in.dayFraction, kClearWeatherSlot, authored);
+        bool resolved = classic.Resolve(kEasternKingdoms, in.camPos, in.dayFraction, kClearWeather, authored);
         FogParams fog = BuildFogParams(in, shippedCfg, resolved ? &authored : nullptr);
         float sunV[3];
         TransformDirection(in.toLight, view, sunV);
