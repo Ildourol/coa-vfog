@@ -153,11 +153,7 @@ writes `CoAVolFog.log` next to itself.
 
 ## Status and limits
 
-- First in-client run (2026-09-23, native D3D9, 2560x1440): hooks, wrapper and INTZ worked, and the
-  server recorded no anticheat alerts (`player_anticheat_alert` empty) with `Warden.Enabled = 1`.
-  That run exposed the camera-relative view, now covered by the harness. DXVK and Wine are untested.
-- Extensions.dll can report "injected DLLs" through opcode `0x51F`; the server logs and stores such
-  alerts and disconnects after more than 5 in 10 s.
+- Tested in the client with native D3D9; DXVK and Wine are untested.
 - Transparent effects, particles and water are fogged by the opaque depth behind them (kit IP-B), so
   near effects in front of the sky are dimmed slightly.
 - Interiors get the outdoor layers; the `gxApi d3d9ex` path is not wrapped (fog stays off there).
