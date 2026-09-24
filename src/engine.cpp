@@ -10,23 +10,24 @@ namespace engine
 {
 namespace
 {
+constexpr uintptr_t kClientImageBase = 0x00400000;
+
 constexpr uintptr_t kGxDevice = 0x00C5DF88;
 constexpr uintptr_t kGxD3DDevice = 0x397C;
 constexpr uintptr_t kGxProjection = 0xF88;
-// The Gx viewport's minZ/maxZ (stored by 0x681890, uploaded lazily by 0x6A99E0 on the next draw or clear).
-constexpr uintptr_t kGxViewportMinZ = 0xF80;
-
-// Screen effects (FFX end 0x8C1010): the effect runs when the ffx CVar is on and the current effect is enabled.
-// The glow effect keeps its ffxGlow CVar at +4 (0x8BFEDB); 0x4F8770 feeds it the DayNight glow at +0x12C.
-constexpr uintptr_t kFfxCVar = 0x00D45774;
-constexpr uintptr_t kCurrentScreenEffect = 0x00D45780;
-constexpr uintptr_t kGlowEffect = 0x00B74364;
-constexpr uintptr_t kGlowEffectCVar = 0x4;
-constexpr uintptr_t kCVarInt = 0x30;
-constexpr uintptr_t kDayNightGlow = 0x00D38C2C;
+constexpr uintptr_t kGxViewportDepthRange = 0xF80;
 constexpr uintptr_t kGxViewIndex = 0x1AF8;
 constexpr uintptr_t kGxViewBase = 0x1B00;
+constexpr uintptr_t kGxViewStride = 64;
 constexpr uint32_t kGxViewStackDepth = 64;
+constexpr float kMinWorldDepthRangeSpan = 0.01f;
+
+constexpr uintptr_t kFfxCVar = 0x00D45774;
+constexpr uintptr_t kCurrentScreenEffect = 0x00D45780;
+constexpr uintptr_t kGlowScreenEffect = 0x00B74364;
+constexpr uintptr_t kScreenEffectEnableCVar = 0x4;
+constexpr uintptr_t kCVarIntValue = 0x30;
+constexpr uintptr_t kDayNightGlow = 0x00D38C2C;
 
 constexpr uintptr_t kViewGlobal = 0x00ADF5E8;
 constexpr uintptr_t kProjectionGlobal = 0x00ADF628;
@@ -37,8 +38,8 @@ constexpr uintptr_t kCurrentMap = 0x00AB63BC;
 constexpr uintptr_t kWorldFrame = 0x00B7436C;
 constexpr uintptr_t kWorldFrameFarClip = 0xB14;
 
-constexpr uintptr_t kFogGroupStart[2] = {0x00D38B90, 0x00D38BA4};
-constexpr uintptr_t kFogGroupEnd[2] = {0x00D38B94, 0x00D38BA8};
+constexpr uintptr_t kFogGroupStart[kDayNightFogGroupCount] = {0x00D38B90, 0x00D38BA4};
+constexpr uintptr_t kFogGroupEnd[kDayNightFogGroupCount] = {0x00D38B94, 0x00D38BA8};
 
 constexpr uintptr_t kDayFraction = 0x00D38B04;
 constexpr uintptr_t kSkyCenter = 0x00D38B18;
@@ -97,29 +98,36 @@ bool ReadGxMatrices(float* view, float* proj)
     uint32_t index = Read<uint32_t>(gx + kGxViewIndex);
     if (index >= kGxViewStackDepth)
         return false;
-    ReadFloats(gx + kGxViewBase + index * 64, view, 16);
+    ReadFloats(gx + kGxViewBase + index * kGxViewStride, view, 16);
     ReadFloats(gx + kGxProjection, proj, 16);
     return Finite(view, 16) && IsPerspective(proj);
+}
+
+bool IsWorldDepthRange(const float* minMaxZ)
+{
+    return Finite(minMaxZ, 2) && minMaxZ[0] >= 0.0f && minMaxZ[1] <= 1.0f &&
+           minMaxZ[1] - minMaxZ[0] > kMinWorldDepthRangeSpan;
+}
+
+void ApplyPendingGxViewportDepthRange(D3DVIEWPORT9& viewport)
+{
+    uintptr_t gx = Read<uintptr_t>(kGxDevice);
+    if (!gx)
+        return;
+    float minMaxZ[2];
+    ReadFloats(gx + kGxViewportDepthRange, minMaxZ, 2);
+    if (IsWorldDepthRange(minMaxZ))
+    {
+        viewport.MinZ = minMaxZ[0];
+        viewport.MaxZ = minMaxZ[1];
+    }
 }
 
 bool CaptureOpaqueStateUnsafe(IDirect3DDevice9* device, OpaqueState& state)
 {
     if (FAILED(device->GetViewport(&state.viewport)))
         return false;
-    // The client applies viewports lazily, so the device can still hold the sky pass's depth range
-    // [0.999, 1] when no world draw followed it. The Gx viewport already holds the world's again: the sky
-    // and WDL passes restore it (0x007F0CB3, 0x00796466). Their rectangles match the world's.
-    uintptr_t gx = Read<uintptr_t>(kGxDevice);
-    if (gx)
-    {
-        float z[2];
-        ReadFloats(gx + kGxViewportMinZ, z, 2);
-        if (Finite(z, 2) && z[0] >= 0.0f && z[1] <= 1.0f && z[1] - z[0] > 0.01f)
-        {
-            state.viewport.MinZ = z[0];
-            state.viewport.MaxZ = z[1];
-        }
-    }
+    ApplyPendingGxViewportDepthRange(state.viewport);
     if (!ReadGxMatrices(state.view, state.proj))
     {
         ReadFloats(kViewGlobal, state.view, 16);
@@ -144,6 +152,22 @@ void Normalize(float* v)
     v[2] /= len;
 }
 
+bool CVarEnabled(uintptr_t cvar)
+{
+    return cvar && Read<int32_t>(cvar + kCVarIntValue) != 0;
+}
+
+float GlowScreenEffectAmount()
+{
+    uintptr_t effect = Read<uintptr_t>(kCurrentScreenEffect);
+    if (!CVarEnabled(Read<uintptr_t>(kFfxCVar)) || !effect || effect != Read<uintptr_t>(kGlowScreenEffect))
+        return 0.0f;
+    float glow = Read<float>(kDayNightGlow);
+    if (!CVarEnabled(Read<uintptr_t>(effect + kScreenEffectEnableCVar)) || !std::isfinite(glow))
+        return 0.0f;
+    return std::clamp(glow, 0.0f, 1.0f);
+}
+
 bool BuildFrameInputsUnsafe(FrameInputs& out)
 {
     std::memcpy(out.view, g_opaque.view, sizeof(out.view));
@@ -166,8 +190,8 @@ bool BuildFrameInputsUnsafe(FrameInputs& out)
     Normalize(out.toLight);
 
     out.fogColor = Read<uint32_t>(kFogColor);
-    out.fogStart = Read<float>(kFogGroupStart[kFrameFogGroup]);
-    out.fogEnd = Read<float>(kFogGroupEnd[kFrameFogGroup]);
+    out.fogStart = Read<float>(kFogGroupStart[kFrameInputsFogGroup]);
+    out.fogEnd = Read<float>(kFogGroupEnd[kFrameInputsFogGroup]);
     out.sunColor = Read<uint32_t>(kSunColor);
     out.directColor = Read<uint32_t>(kDirectColor);
     out.ambientColor = Read<uint32_t>(kAmbientColor);
@@ -175,18 +199,7 @@ bool BuildFrameInputsUnsafe(FrameInputs& out)
     out.mapId = Read<int32_t>(kCurrentMap);
 
     out.zoneFogDistance = Read<float>(kZoneFogDistance);
-    out.glow = 0.0f;
-    uintptr_t ffx = Read<uintptr_t>(kFfxCVar);
-    uintptr_t effect = Read<uintptr_t>(kCurrentScreenEffect);
-    // In liquid the client swaps to the wave-glow pass list with a different formula; the fog is skipped there
-    // by default anyway.
-    if (!out.inLiquid && ffx && Read<int32_t>(ffx + kCVarInt) != 0 && effect && effect == Read<uintptr_t>(kGlowEffect))
-    {
-        uintptr_t glowCVar = Read<uintptr_t>(effect + kGlowEffectCVar);
-        float glow = Read<float>(kDayNightGlow);
-        if (glowCVar && Read<int32_t>(glowCVar + kCVarInt) != 0 && std::isfinite(glow))
-            out.glow = std::clamp(glow, 0.0f, 1.0f);
-    }
+    out.glow = out.inLiquid ? 0.0f : GlowScreenEffectAmount();
     out.farClip = out.proj[14] / (1.0f - out.proj[10]);
     if (!(out.farClip > 10.0f && out.farClip < 100000.0f))
     {
@@ -206,7 +219,7 @@ bool IsSupportedClient()
     auto* base = reinterpret_cast<const unsigned char*>(GetModuleHandleA(nullptr));
     auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
     auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-    return nt->FileHeader.TimeDateStamp == kClientTimestamp && nt->OptionalHeader.ImageBase == 0x400000;
+    return nt->FileHeader.TimeDateStamp == kClientTimestamp && nt->OptionalHeader.ImageBase == kClientImageBase;
 }
 
 void* GameD3DDevice()
@@ -230,20 +243,20 @@ bool CameraInLiquid()
 StockFog ReadStockFog()
 {
     StockFog fog;
-    for (int i = 0; i < 2; ++i)
+    for (int group = 0; group < kDayNightFogGroupCount; ++group)
     {
-        fog.start[i] = Read<float>(kFogGroupStart[i]);
-        fog.end[i] = Read<float>(kFogGroupEnd[i]);
+        fog.start[group] = Read<float>(kFogGroupStart[group]);
+        fog.end[group] = Read<float>(kFogGroupEnd[group]);
     }
     return fog;
 }
 
 void WriteStockFog(const StockFog& fog)
 {
-    for (int i = 0; i < 2; ++i)
+    for (int group = 0; group < kDayNightFogGroupCount; ++group)
     {
-        *reinterpret_cast<float*>(kFogGroupStart[i]) = fog.start[i];
-        *reinterpret_cast<float*>(kFogGroupEnd[i]) = fog.end[i];
+        *reinterpret_cast<float*>(kFogGroupStart[group]) = fog.start[group];
+        *reinterpret_cast<float*>(kFogGroupEnd[group]) = fog.end[group];
     }
 }
 

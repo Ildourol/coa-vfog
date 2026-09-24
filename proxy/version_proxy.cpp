@@ -1,12 +1,13 @@
-// version.dll proxy. Its static import of CoAVolFog.dll makes the loader initialise the fog module
-// before the client starts; every export forwards lazily to the system version.dll.
 #include <windows.h>
 
 extern "C" __declspec(dllimport) int __cdecl vf_loader_anchor();
 
 namespace
 {
-const char* const kExports[17] = {
+constexpr int kExportCount = 17;
+constexpr unsigned kUnresolvedExportExitCode = 0xDEAD0000u;
+
+const char* const kExports[kExportCount] = {
     "GetFileVersionInfoA",       "GetFileVersionInfoByHandle", "GetFileVersionInfoExA",
     "GetFileVersionInfoExW",     "GetFileVersionInfoSizeA",    "GetFileVersionInfoSizeExA",
     "GetFileVersionInfoSizeExW", "GetFileVersionInfoSizeW",    "GetFileVersionInfoW",
@@ -15,7 +16,7 @@ const char* const kExports[17] = {
     "VerQueryValueA",            "VerQueryValueW",
 };
 
-HMODULE LoadSystemVersion()
+HMODULE LoadSystemVersionDll()
 {
     static HMODULE module = nullptr;
     if (!module)
@@ -29,14 +30,14 @@ HMODULE LoadSystemVersion()
 }
 }
 
-extern "C" void* g_versionTargets[17] = {};
+extern "C" void* g_versionTargets[kExportCount] = {};
 
 extern "C" void __cdecl ResolveVersionExport(int index)
 {
-    HMODULE real = LoadSystemVersion();
+    HMODULE real = LoadSystemVersionDll();
     void* target = real ? reinterpret_cast<void*>(GetProcAddress(real, kExports[index])) : nullptr;
     if (!target)
-        ExitProcess(0xDEAD0000u | static_cast<unsigned>(index));
+        ExitProcess(kUnresolvedExportExitCode | static_cast<unsigned>(index));
     InterlockedExchangePointer(&g_versionTargets[index], target);
 }
 

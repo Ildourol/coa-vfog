@@ -15,13 +15,21 @@ namespace
 {
 using GetProcAddressFn = FARPROC(WINAPI*)(HMODULE, LPCSTR);
 
-constexpr float kStockFogAway = 50000.0f;
+constexpr unsigned char kCallRel32Opcode = 0xE8;
+constexpr uintptr_t kCallRel32Size = 5;
+constexpr float kOutOfRangeStockFogStart = 50000.0f;
+constexpr DWORD kConfigReloadIntervalMs = 1000;
+constexpr unsigned kMaxSkipsLogged = 50;
+constexpr int kEasternKingdomsMap = 0;
+constexpr int kKalimdorMap = 1;
+constexpr int kOutlandMap = 530;
+constexpr int kNorthrendMap = 571;
 
 uintptr_t g_worldRenderTarget = engine::kWorldRenderTarget;
-uintptr_t g_opaqueDoneTarget = engine::kOpaqueDoneTarget;
+uintptr_t g_opaqueM2PassTarget = engine::kOpaqueM2PassTarget;
 uintptr_t g_liquidSurfaceTarget = engine::kLiquidSurfaceTarget;
-FogDevice* g_liquidDevice = nullptr;
-uintptr_t g_worldDoneTarget = engine::kWorldDoneTarget;
+FogDevice* g_liquidDepthWriteDevice = nullptr;
+uintptr_t g_screenEffectsTarget = engine::kScreenEffectsTarget;
 bool g_failed = false;
 bool g_renderedLastFrame = false;
 bool g_renderedThisFrame = false;
@@ -64,49 +72,58 @@ FogDevice* GameFogDevice()
     return device;
 }
 
-// The volumetric fog replaces the stock fog only while it is actually drawing, so a frame it
-// skips keeps the client's own fog.
-void OnFrameBegin()
+bool FogDrawsInPlaceOfStockFog()
 {
-    g_renderedThisFrame = false;
-    const Config& cfg = GlobalConfig().Get();
-    if (g_failed || !g_renderedLastFrame || cfg.stockFog != 1 || engine::CameraInLiquid() || !GameFogDevice())
-        return;
+    return !g_failed && g_renderedLastFrame && GlobalConfig().Get().stockFog == 1 && !engine::CameraInLiquid() &&
+           GameFogDevice();
+}
+
+void PushStockFogOutOfRange()
+{
     g_savedStockFog = engine::ReadStockFog();
-    engine::StockFog pushed;
-    for (int i = 0; i < 2; ++i)
+    engine::StockFog outOfRange;
+    for (int group = 0; group < engine::kDayNightFogGroupCount; ++group)
     {
-        pushed.start[i] = kStockFogAway;
-        pushed.end[i] = kStockFogAway * 2.0f;
+        outOfRange.start[group] = kOutOfRangeStockFogStart;
+        outOfRange.end[group] = kOutOfRangeStockFogStart * 2.0f;
     }
-    engine::WriteStockFog(pushed);
+    engine::WriteStockFog(outOfRange);
     g_stockFogPushed = true;
 }
 
-// Water writes no depth in the stock client; while the fog draws, the liquid surface pass writes it so
-// water is fogged by its own distance instead of by the sea floor or the sky behind it.
-void OnLiquidBegin()
+void RestorePushedStockFog()
+{
+    if (!g_stockFogPushed)
+        return;
+    engine::WriteStockFog(g_savedStockFog);
+    g_stockFogPushed = false;
+}
+
+void OnFrameBegin()
+{
+    g_renderedThisFrame = false;
+    if (FogDrawsInPlaceOfStockFog())
+        PushStockFogOutOfRange();
+}
+
+void OnLiquidSurfaceBegin()
 {
     if (g_failed || !g_renderedLastFrame || !GlobalConfig().Get().liquidDepth)
         return;
-    g_liquidDevice = GameFogDevice();
-    ForceDepthWrite(g_liquidDevice, true);
+    g_liquidDepthWriteDevice = GameFogDevice();
+    ForceDepthWrite(g_liquidDepthWriteDevice, true);
 }
 
-void OnLiquidEnd()
+void OnLiquidSurfaceEnd()
 {
-    ForceDepthWrite(g_liquidDevice, false);
-    g_liquidDevice = nullptr;
+    ForceDepthWrite(g_liquidDepthWriteDevice, false);
+    g_liquidDepthWriteDevice = nullptr;
 }
 
 void OnFrameEnd()
 {
-    OnLiquidEnd();
-    if (g_stockFogPushed)
-    {
-        engine::WriteStockFog(g_savedStockFog);
-        g_stockFogPushed = false;
-    }
+    OnLiquidSurfaceEnd();
+    RestorePushedStockFog();
     g_renderedLastFrame = g_renderedThisFrame;
 }
 
@@ -118,6 +135,22 @@ void OnOpaqueDone()
     engine::CaptureOpaqueState(RealDevice(device));
 }
 
+void ReloadConfigAfterInterval()
+{
+    DWORD now = GetTickCount();
+    if (now - g_lastReload > kConfigReloadIntervalMs)
+    {
+        g_lastReload = now;
+        GlobalConfig().ReloadIfChanged();
+    }
+}
+
+void UseClientFogRangeInsteadOfPushed(FrameInputs& in)
+{
+    in.fogStart = g_savedStockFog.start[engine::kFrameInputsFogGroup];
+    in.fogEnd = g_savedStockFog.end[engine::kFrameInputsFogGroup];
+}
+
 void OnWorldDone()
 {
     FogDevice* device = g_failed ? nullptr : GameFogDevice();
@@ -127,22 +160,13 @@ void OnWorldDone()
         return;
     }
 
-    DWORD now = GetTickCount();
-    if (now - g_lastReload > 1000)
-    {
-        g_lastReload = now;
-        GlobalConfig().ReloadIfChanged();
-    }
+    ReloadConfigAfterInterval();
 
     FrameInputs in = {};
     bool valid = engine::BuildFrameInputs(in);
     engine::ClearOpaqueState();
     if (g_stockFogPushed)
-    {
-        // BuildFrameInputs read the pushed values; the fog model wants the client's own.
-        in.fogStart = g_savedStockFog.start[engine::kFrameFogGroup];
-        in.fogEnd = g_savedStockFog.end[engine::kFrameFogGroup];
-    }
+        UseClientFogRangeInsteadOfPushed(in);
     const Config& cfg = GlobalConfig().Get();
     const char* skip = "invalid frame inputs";
     bool rendered = false;
@@ -151,7 +175,7 @@ void OnWorldDone()
     else if (valid)
         skip = "camera under liquid";
     g_renderedThisFrame = rendered;
-    if (!rendered && skip != g_lastSkip && g_skipsLogged < 50)
+    if (!rendered && skip != g_lastSkip && g_skipsLogged < kMaxSkipsLogged)
     {
         ++g_skipsLogged;
         VF_LOG_INFO("fog skipped: %s", skip);
@@ -170,19 +194,19 @@ bool PatchCallSite(uintptr_t site, uintptr_t expectedTarget, const void* thunk)
     auto* bytes = reinterpret_cast<unsigned char*>(site);
     int32_t rel;
     std::memcpy(&rel, bytes + 1, sizeof(rel));
-    if (bytes[0] != 0xE8 || site + 5 + rel != expectedTarget)
+    if (bytes[0] != kCallRel32Opcode || site + kCallRel32Size + rel != expectedTarget)
     {
         VF_LOG_ERROR("call site 0x%08X does not match (E8 -> 0x%08X expected); hooks not installed",
                      static_cast<unsigned>(site), static_cast<unsigned>(expectedTarget));
         return false;
     }
-    int32_t newRel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(thunk) - (site + 5));
+    int32_t newRel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(thunk) - (site + kCallRel32Size));
     DWORD old;
     if (!VirtualProtect(bytes + 1, sizeof(newRel), PAGE_EXECUTE_READWRITE, &old))
         return false;
     std::memcpy(bytes + 1, &newRel, sizeof(newRel));
     VirtualProtect(bytes + 1, sizeof(newRel), old, &old);
-    FlushInstructionCache(GetCurrentProcess(), bytes, 5);
+    FlushInstructionCache(GetCurrentProcess(), bytes, kCallRel32Size);
     return true;
 }
 
@@ -191,47 +215,54 @@ bool SiteMatches(uintptr_t site, uintptr_t expectedTarget)
     auto* bytes = reinterpret_cast<const unsigned char*>(site);
     int32_t rel;
     std::memcpy(&rel, bytes + 1, sizeof(rel));
-    return bytes[0] == 0xE8 && site + 5 + rel == expectedTarget;
+    return bytes[0] == kCallRel32Opcode && site + kCallRel32Size + rel == expectedTarget;
 }
 
-using FarClipClampFn = float(__cdecl*)(float value, int map);
 float g_loggedFarClip = -1.0f;
 int g_loggedFarClipMap = -1;
 
-// The maps whose far clip Extensions.dll's detour of the clamp caps at 791.66; the engine allows 1583.33.
-bool CappedContinent(int map)
+float ClientFarClipClamp(float farClipSetting, int mapId)
 {
-    return map == 0 || map == 1 || map == 530 || map == 571;
+    return reinterpret_cast<engine::FarClipClampFn>(engine::kFarClipClamp)(farClipSetting, mapId);
 }
 
-float FarClipClamp(float value, int map)
+bool IsContinentCappedByExtensionsDll(int mapId)
 {
-    float result = reinterpret_cast<FarClipClampFn>(engine::kFarClipClamp)(value, map);
-    // Rare (farclip changes, map loads, zone changes), and the fog's own reload does not run while it is off.
+    return mapId == kEasternKingdomsMap || mapId == kKalimdorMap || mapId == kOutlandMap || mapId == kNorthrendMap;
+}
+
+const Config& ReloadedConfig()
+{
     GlobalConfig().ReloadIfChanged();
-    const float lift = GlobalConfig().Get().farClipMax;
-    if (lift > 0.0f && CappedContinent(map) && std::isfinite(value))
-        result = std::max(result, std::clamp(value, kEngineFarClipMin, std::min(lift, kEngineFarClipMax)));
-    if (result != g_loggedFarClip || map != g_loggedFarClipMap)
+    return GlobalConfig().Get();
+}
+
+float LiftedFarClipClamp(float farClipSetting, int mapId)
+{
+    float result = ClientFarClipClamp(farClipSetting, mapId);
+    const float farClipMax = ReloadedConfig().farClipMax;
+    if (farClipMax > 0.0f && IsContinentCappedByExtensionsDll(mapId) && std::isfinite(farClipSetting))
+        result = std::max(result,
+                          std::clamp(farClipSetting, kEngineFarClipMin, std::min(farClipMax, kEngineFarClipMax)));
+    if (result != g_loggedFarClip || mapId != g_loggedFarClipMap)
     {
         g_loggedFarClip = result;
-        g_loggedFarClipMap = map;
-        VF_LOG_INFO("far clip: map %d, farclip setting %.1f -> %.2f", map, value, result);
+        g_loggedFarClipMap = mapId;
+        VF_LOG_INFO("far clip: map %d, farclip setting %.1f -> %.2f", mapId, farClipSetting, result);
     }
     return result;
 }
 }
 
-// 0x780810 / 0x781444: cdecl (farclip value, map id), result in ST0, the caller pops the arguments.
-extern "C" float __cdecl vf_far_clip_clamp(float value, int map)
+extern "C" float __cdecl vf_far_clip_clamp(float farClipSetting, int mapId)
 {
     __try
     {
-        return FarClipClamp(value, map);
+        return LiftedFarClipClamp(farClipSetting, mapId);
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        return reinterpret_cast<FarClipClampFn>(engine::kFarClipClamp)(value, map);
+        return ClientFarClipClamp(farClipSetting, mapId);
     }
 }
 
@@ -263,7 +294,7 @@ extern "C" void __cdecl vf_on_liquid_begin()
 {
     __try
     {
-        OnLiquidBegin();
+        OnLiquidSurfaceBegin();
     }
     __except (GuardFilter(GetExceptionCode(), "liquid begin hook"))
     {
@@ -275,7 +306,7 @@ extern "C" void __cdecl vf_on_liquid_end()
 {
     __try
     {
-        OnLiquidEnd();
+        OnLiquidSurfaceEnd();
     }
     __except (GuardFilter(GetExceptionCode(), "liquid end hook"))
     {
@@ -307,7 +338,6 @@ extern "C" void __cdecl vf_on_world_done()
     }
 }
 
-// 0x4FB03D: the world render, thiscall on the world frame with no stack arguments.
 __declspec(naked) static void WorldRenderThunk()
 {
     __asm {
@@ -322,12 +352,11 @@ __declspec(naked) static void WorldRenderThunk()
     }
 }
 
-// 0x4F911D: thiscall M2 pass with one stack argument (ret 4). ECX is passed through untouched.
-__declspec(naked) static void OpaqueDoneThunk()
+__declspec(naked) static void OpaqueM2PassThunk()
 {
     __asm {
         push dword ptr [esp + 4]
-        call dword ptr [g_opaqueDoneTarget]
+        call dword ptr [g_opaqueM2PassTarget]
         pushad
         call vf_on_opaque_done
         popad
@@ -335,7 +364,6 @@ __declspec(naked) static void OpaqueDoneThunk()
     }
 }
 
-// 0x4F9170: the liquid surface pass (no arguments), outside liquid only.
 __declspec(naked) static void LiquidSurfaceThunk()
 {
     __asm {
@@ -350,14 +378,13 @@ __declspec(naked) static void LiquidSurfaceThunk()
     }
 }
 
-// 0x4F9281: FFX end, no arguments. Runs the fog before the glow and screen effects, then tail-calls it.
-__declspec(naked) static void WorldDoneThunk()
+__declspec(naked) static void ScreenEffectsThunk()
 {
     __asm {
         pushad
         call vf_on_world_done
         popad
-        jmp dword ptr [g_worldDoneTarget]
+        jmp dword ptr [g_screenEffectsTarget]
     }
 }
 
@@ -366,7 +393,7 @@ namespace
 struct CallSite
 {
     uintptr_t site;
-    uintptr_t target;
+    uintptr_t originalTarget;
     const void* thunk;
 };
 }
@@ -383,12 +410,12 @@ bool InstallEngineHooks()
     }
     const CallSite sites[] = {
         {engine::kWorldRenderSite, engine::kWorldRenderTarget, &WorldRenderThunk},
-        {engine::kOpaqueDoneSite, engine::kOpaqueDoneTarget, &OpaqueDoneThunk},
+        {engine::kOpaqueM2PassSite, engine::kOpaqueM2PassTarget, &OpaqueM2PassThunk},
         {engine::kLiquidSurfaceSite, engine::kLiquidSurfaceTarget, &LiquidSurfaceThunk},
-        {engine::kWorldDoneSite, engine::kWorldDoneTarget, &WorldDoneThunk},
+        {engine::kScreenEffectsSite, engine::kScreenEffectsTarget, &ScreenEffectsThunk},
     };
     for (const CallSite& s : sites)
-        if (!SiteMatches(s.site, s.target))
+        if (!SiteMatches(s.site, s.originalTarget))
         {
             VF_LOG_ERROR("world render call site 0x%08X differs from the 12340 client; hooks not installed",
                          static_cast<unsigned>(s.site));
@@ -397,11 +424,11 @@ bool InstallEngineHooks()
     int patched = 0;
     for (const CallSite& s : sites)
     {
-        if (!PatchCallSite(s.site, s.target, s.thunk))
+        if (!PatchCallSite(s.site, s.originalTarget, s.thunk))
         {
             while (patched-- > 0)
                 PatchCallSite(sites[patched].site, reinterpret_cast<uintptr_t>(sites[patched].thunk),
-                              reinterpret_cast<const void*>(sites[patched].target));
+                              reinterpret_cast<const void*>(sites[patched].originalTarget));
             return false;
         }
         ++patched;
@@ -409,12 +436,11 @@ bool InstallEngineHooks()
     *slot = &GetProcAddressFilter;
     VF_LOG_INFO("engine hooks installed: GetProcAddress filter, world render 0x%08X, opaque 0x%08X, liquid 0x%08X, "
                 "world done 0x%08X",
-                static_cast<unsigned>(engine::kWorldRenderSite), static_cast<unsigned>(engine::kOpaqueDoneSite),
-                static_cast<unsigned>(engine::kLiquidSurfaceSite), static_cast<unsigned>(engine::kWorldDoneSite));
+                static_cast<unsigned>(engine::kWorldRenderSite), static_cast<unsigned>(engine::kOpaqueM2PassSite),
+                static_cast<unsigned>(engine::kLiquidSurfaceSite), static_cast<unsigned>(engine::kScreenEffectsSite));
     return true;
 }
 
-// Installed only when FarClipMax is set at start-up; a mismatch here only leaves the client's far clip as it is.
 void InstallFarClipHooks()
 {
     if (GlobalConfig().Get().farClipMax <= 0.0f)
@@ -422,7 +448,7 @@ void InstallFarClipHooks()
         VF_LOG_INFO("far clip hooks not installed (FarClipMax=0)");
         return;
     }
-    const uintptr_t sites[] = {engine::kFarClipSetSite, engine::kFarClipMapLoadSite};
+    const uintptr_t sites[] = {engine::kFarClipCVarSetSite, engine::kFarClipMapLoadSite};
     for (uintptr_t site : sites)
         if (!SiteMatches(site, engine::kFarClipClamp))
         {
