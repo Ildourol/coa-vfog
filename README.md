@@ -172,3 +172,8 @@ writes `CoAVolFog.log` next to itself.
 - Classic data covers the lights the Classic `Light` table references (slot 0, clear weather); zone
   lights, weather/underwater/death slots and noise modulation are not used yet.
 - Not implemented from the kit: the froxel pipeline (M3), fitted fog for transparents (M6), in-game CVars.
+
+## License
+
+GPL-2.0, see `LICENSE`. `data/fogdata.bin` is converted from WoW Classic client data and is not covered
+by it.
