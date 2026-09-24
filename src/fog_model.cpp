@@ -42,6 +42,8 @@ constexpr float kDerivedLayerLimit = 1500.0f;
 
 constexpr float kMoonLight = 0.35f;
 constexpr float kLightSettingHalfWidth = 0.02f;
+constexpr float kMinClassicDirectLuminance = 1.0e-3f;
+constexpr float kLuminanceWeights[3] = {0.2126f, 0.7152f, 0.0722f};
 constexpr float kReferenceFarTarget = 200.0f;
 constexpr float kNoLimit = 1.0e9f;
 
@@ -63,6 +65,11 @@ void Encode(float* rgb, bool linear)
     if (linear)
         for (int i = 0; i < 3; ++i)
             rgb[i] = std::pow(std::max(rgb[i], 0.0f), 2.2f);
+}
+
+float Luminance(const float* rgb)
+{
+    return rgb[0] * kLuminanceWeights[0] + rgb[1] * kLuminanceWeights[1] + rgb[2] * kLuminanceWeights[2];
 }
 
 float ReferenceZ(const FrameInputs& in)
@@ -244,6 +251,18 @@ bool HaloHue(const AuthoredFog& fog, float* displayReferredRgb)
     Scale(c, 1.0f / peak, displayReferredRgb);
     return true;
 }
+
+float ClientToClassicDirectLight(const AuthoredFog& fog, const float* clientDirectLight, bool linear)
+{
+    if (!fog.hasClassicDirectLight)
+        return 1.0f;
+    float classic[3] = {fog.classicDirectLight[0], fog.classicDirectLight[1], fog.classicDirectLight[2]};
+    Encode(classic, linear);
+    const float classicLuminance = Luminance(classic);
+    if (classicLuminance < kMinClassicDirectLuminance)
+        return 1.0f;
+    return std::clamp(Luminance(clientDirectLight) / classicLuminance, 0.0f, 1.0f);
+}
 }
 
 void UnpackColor(uint32_t argb, float* rgb)
@@ -280,9 +299,11 @@ FogParams BuildFogParams(const FrameInputs& in, const Config& cfg, const Authore
     float elevationFadedScatter = p.lightVisibility * cfg.sunScatter;
 
     FogLayer& distanceFog = p.layers[kDistanceFogLayer];
+    p.directLightMatch = 1.0f;
     if (p.authored)
     {
-        AuthoredLayers(*authored, cfg, p, cfg.sunScatter, p.layers);
+        p.directLightMatch = ClientToClassicDirectLight(*authored, p.lightColor, p.linear);
+        AuthoredLayers(*authored, cfg, p, cfg.sunScatter * p.directLightMatch, p.layers);
         HaloHue(*authored, p.rayColor);
         DistanceLayer(in, cfg, p, elevationFadedScatter, fogColor, distanceFog);
         distanceFog.density *= ClassicFogThinness(p, *authored, in.camPos[2]);

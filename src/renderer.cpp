@@ -642,9 +642,9 @@ bool Renderer::RenderPasses(IDirect3DDevice9* dev, IDirect3DTexture9* depthTextu
                     toLightInView[0], toLightInView[1], toLightInView[2], fog.lightVisibility, fog.lightAboveHorizon,
                     sunPx[0], sunPx[1], rayStrength);
         VF_LOG_INFO("  map %d fog %08X start %.1f end %.1f zone %.1f sun %08X direct %08X ambient %08X refZ %.1f "
-                    "glow %.2f",
+                    "glow %.2f, direct light vs Classic %.2f",
                     in.mapId, in.fogColor, in.fogStart, in.fogEnd, in.zoneFogDistance, in.sunColor, in.directColor,
-                    in.ambientColor, fog.referenceZ, in.clientGlowAmount);
+                    in.ambientColor, fog.referenceZ, in.clientGlowAmount, fog.directLightMatch);
         for (int i = 0; i < kFogLayers; ++i)
         {
             const FogLayer& l = fog.layers[i];

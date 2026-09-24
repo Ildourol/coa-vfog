@@ -45,6 +45,8 @@ struct AuthoredFog
     uint32_t lightIds[kMaxBlendedLights];
     float lightWeights[kMaxBlendedLights];
     float coverage;
+    bool hasClassicDirectLight;
+    float classicDirectLight[3];
 };
 
 class FogData
@@ -82,6 +84,7 @@ private:
         uint16_t halfMinuteOfDay;
         uint16_t layerCount;
         uint32_t firstLayer;
+        uint32_t directRgb;
     };
     struct Layer
     {
@@ -116,7 +119,7 @@ private:
         float x;
         float y;
     };
-    static_assert(sizeof(Light) == 60 && sizeof(Params) == 12 && sizeof(Key) == 8 && sizeof(Layer) == 60 &&
+    static_assert(sizeof(Light) == 60 && sizeof(Params) == 12 && sizeof(Key) == 12 && sizeof(Layer) == 60 &&
                       sizeof(ZoneLight) == 28 && sizeof(ZonePoint) == 8,
                   "records match the struct formats of tools/convert_classic_fog.py");
 
@@ -138,6 +141,13 @@ private:
         void Add(const Light* light, float weight);
         void Scale(float factor);
     };
+    struct ConditionFog
+    {
+        AuthoredLayer layers[kMaxAuthoredLayers];
+        int layerCount;
+        float directLight[3];
+        float directLightPresence;
+    };
 
     static bool IsMapWide(const Light& light);
     static float SphereWeight(const Light& light, const float* position);
@@ -150,9 +160,10 @@ private:
     void CollectMapsWithFog();
     LightBlend BlendLights(int mapId, const float* position) const;
     static AuthoredLayer Unpack(const Layer& layer);
-    int InterpolateKeys(const Params& params, float halfMinuteOfDay, AuthoredLayer* out) const;
-    int ConditionLayers(const Light& light, float halfMinuteOfDay, const LightParamsSelection& selection,
-                        AuthoredLayer* out) const;
+    static ConditionFog BlendConditions(const ConditionFog& a, const ConditionFog& b, float bWeight);
+    ConditionFog InterpolateKeys(const Params& params, float halfMinuteOfDay) const;
+    ConditionFog LightConditionFog(const Light& light, float halfMinuteOfDay,
+                                   const LightParamsSelection& selection) const;
 
     std::vector<Light> m_lights;
     std::vector<Params> m_params;

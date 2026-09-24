@@ -744,6 +744,32 @@ FrameInputs ContinentFrame(int map, Vec3 eye, float dayFraction, Vec3 toLight, b
     return in;
 }
 
+void CheckStormFogFollowsClientDirectLight(const FogData& data)
+{
+    const Config cfg = {};
+    const Vec3 goldshire = {-9456.8f, 54.7f, 59.6f};
+    const float eightPm = 0.8337f;
+    const Vec3 lowSun = {0.704f, 0.704f, 0.086f};
+    constexpr uint32_t kClientStormDirectLight = 0xFF656565;
+    constexpr uint32_t kWhiteDirectLight = 0xFFFFFFFF;
+    FrameInputs storm = ContinentFrame(kEasternKingdoms, goldshire, eightPm, lowSun, false);
+    storm.directColor = kClientStormDirectLight;
+    FrameInputs bright = storm;
+    bright.directColor = kWhiteDirectLight;
+    AuthoredFog fog = {};
+    bool resolved = data.Resolve(kEasternKingdoms, storm.camPos, eightPm, Storm(1.0f), fog);
+    FogParams dim = BuildFogParams(storm, cfg, &fog);
+    FogParams full = BuildFogParams(bright, cfg, &fog);
+    const float diffuseRatio = dim.layers[2].diffuse[0] / std::fmax(full.layers[2].diffuse[0], 1e-6f);
+    std::printf("     Goldshire storm 20:00: client direct light vs Classic %.2f (white light %.2f), "
+                "sun scatter %.2f -> %.2f\n",
+                dim.directLightMatch, full.directLightMatch, full.layers[2].diffuse[0], dim.layers[2].diffuse[0]);
+    Check(resolved && dim.directLightMatch > 0.35f && dim.directLightMatch < 0.47f &&
+              Near(diffuseRatio, dim.directLightMatch),
+          "storm fog scatters the client's dimmer storm sunlight, not Classic's");
+    Check(full.directLightMatch == 1.0f, "a client direct light brighter than Classic's never brightens the fog");
+}
+
 void CheckDenseClassicFogAtHarbourSunset(const FogData& data)
 {
     const Config cfg = {};
@@ -997,6 +1023,7 @@ int Run(const std::wstring& outDir, const std::string& dataPath)
     CheckStormBlendsLayersByClassicIndex(classic);
     CheckScreenEffectLightSlot(classic);
     CheckZoneLights(classic);
+    CheckStormFogFollowsClientDirectLight(classic);
     CheckDenseClassicFogAtHarbourSunset(classic);
     CheckThinClassicFogAtHyjalMidnight(classic);
     CheckFogThinsIntoFoglessClassicLight(classic);

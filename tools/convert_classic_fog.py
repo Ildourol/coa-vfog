@@ -14,11 +14,11 @@ CLIENT_SELECTED_FLAG = 0x8
 LIGHT_PARAMS_SLOTS = 8
 
 FILE_MAGIC = b"VFD1"
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 HEADER_FORMAT = "<4s7I"
 LIGHT_FORMAT = "<Ii5f8I"
 PARAMS_FORMAT = "<3I"
-KEY_FORMAT = "<2HI"
+KEY_FORMAT = "<2H2I"
 LAYER_FORMAT = "<4I11f"
 ZONE_LIGHT_FORMAT = "<IiI2f2I"
 ZONE_POINT_FORMAT = "<2f"
@@ -115,8 +115,8 @@ def pack_params(params_id, first_key, key_count):
     return struct.pack(PARAMS_FORMAT, params_id, first_key, key_count)
 
 
-def pack_key(half_minute_of_day, layer_count, first_layer):
-    return struct.pack(KEY_FORMAT, half_minute_of_day, layer_count, first_layer)
+def pack_key(half_minute_of_day, layer_count, first_layer, direct_rgb):
+    return struct.pack(KEY_FORMAT, half_minute_of_day, layer_count, first_layer, direct_rgb)
 
 
 def pack_layer(row):
@@ -179,7 +179,8 @@ def convert(tables):
         layers = layers_by_index(fog_by_data.get(row["ID"], []))
         if layers:
             half_minute_of_day = int(float(row["Time"])) & U16_MASK
-            keys_by_params.setdefault(int(row["LightParamID"]), []).append((half_minute_of_day, layers))
+            direct_rgb = as_color(row["DirectColor"])
+            keys_by_params.setdefault(int(row["LightParamID"]), []).append((half_minute_of_day, layers, direct_rgb))
 
     lights = []
     used_params = set()
@@ -193,8 +194,8 @@ def convert(tables):
     for params_id in sorted(used_params):
         keys = sorted(keys_by_params[params_id], key=lambda k: k[0])
         params_blob.append(pack_params(params_id, key_count, len(keys)))
-        for half_minute_of_day, layers in keys:
-            keys_blob.append(pack_key(half_minute_of_day, len(layers), layer_count))
+        for half_minute_of_day, layers, direct_rgb in keys:
+            keys_blob.append(pack_key(half_minute_of_day, len(layers), layer_count, direct_rgb))
             layers_blob.extend(pack_layer(r) for r in layers)
             layer_count += len(layers)
             key_count += 1

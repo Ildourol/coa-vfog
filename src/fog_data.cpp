@@ -11,7 +11,7 @@
 namespace
 {
 constexpr char kFileMagic[4] = {'V', 'F', 'D', '1'};
-constexpr uint32_t kFormatVersion = 2;
+constexpr uint32_t kFormatVersion = 3;
 constexpr float kHalfMinutesPerDay = 2880.0f;
 constexpr uint32_t kMinimumOutlinePoints = 3;
 constexpr uint32_t kClientSelectedLayerFlag = 0x8;
@@ -95,6 +95,32 @@ private:
     float m_presence = 0.0f;
     float m_dominantWeight = 0.0f;
     uint32_t m_dominantFlags = 0;
+};
+
+class DirectLightBlend
+{
+public:
+    void Add(const float* rgb, float presence, float weight)
+    {
+        const float w = presence * weight;
+        if (w <= 0.0f)
+            return;
+        for (int i = 0; i < 3; ++i)
+            m_sum[i] += rgb[i] * w;
+        m_presence += w;
+    }
+
+    float Presence() const { return m_presence; }
+
+    void Result(float* rgb) const
+    {
+        for (int i = 0; i < 3; ++i)
+            rgb[i] = m_presence > 0.0f ? m_sum[i] / m_presence : 0.0f;
+    }
+
+private:
+    float m_sum[3] = {};
+    float m_presence = 0.0f;
 };
 
 float SquaredDistanceToSegment(float px, float py, float ax, float ay, float bx, float by)
@@ -247,12 +273,13 @@ const FogData::Params* FogData::FindParams(uint32_t id) const
     return it != m_params.end() && it->id == id ? &*it : nullptr;
 }
 
-int FogData::InterpolateKeys(const Params& params, float halfMinuteOfDay, AuthoredLayer* out) const
+FogData::ConditionFog FogData::InterpolateKeys(const Params& params, float halfMinuteOfDay) const
 {
+    ConditionFog fog = {};
     const Key* keys = &m_keys[params.firstKey];
     const uint32_t count = params.keyCount;
     if (count == 0)
-        return 0;
+        return fog;
 
     uint32_t next = 0;
     while (next < count && keys[next].halfMinuteOfDay <= halfMinuteOfDay)
@@ -270,17 +297,43 @@ int FogData::InterpolateKeys(const Params& params, float halfMinuteOfDay, Author
 
     const Key& a = keys[prev];
     const Key& b = keys[next];
-    const int layerCount = std::min<int>(std::max(a.layerCount, b.layerCount), kMaxAuthoredLayers);
-    for (int i = 0; i < layerCount; ++i)
+    fog.layerCount = std::min<int>(std::max(a.layerCount, b.layerCount), kMaxAuthoredLayers);
+    for (int i = 0; i < fog.layerCount; ++i)
     {
         LayerBlend blend;
         if (i < a.layerCount)
             blend.Add(Unpack(m_layers[a.firstLayer + i]), 1.0f - fraction);
         if (i < b.layerCount)
             blend.Add(Unpack(m_layers[b.firstLayer + i]), fraction);
-        out[i] = blend.Result();
+        fog.layers[i] = blend.Result();
     }
-    return layerCount;
+    float directA[3];
+    float directB[3];
+    UnpackRgb(a.directRgb, directA);
+    UnpackRgb(b.directRgb, directB);
+    for (int i = 0; i < 3; ++i)
+        fog.directLight[i] = directA[i] + (directB[i] - directA[i]) * fraction;
+    fog.directLightPresence = 1.0f;
+    return fog;
+}
+
+FogData::ConditionFog FogData::BlendConditions(const ConditionFog& a, const ConditionFog& b, float bWeight)
+{
+    ConditionFog blended = {};
+    blended.layerCount = std::max(a.layerCount, b.layerCount);
+    for (int i = 0; i < blended.layerCount; ++i)
+    {
+        LayerBlend blend;
+        blend.Add(a.layers[i], 1.0f - bWeight);
+        blend.Add(b.layers[i], bWeight);
+        blended.layers[i] = blend.Result();
+    }
+    DirectLightBlend direct;
+    direct.Add(a.directLight, a.directLightPresence, 1.0f - bWeight);
+    direct.Add(b.directLight, b.directLightPresence, bWeight);
+    direct.Result(blended.directLight);
+    blended.directLightPresence = direct.Presence();
+    return blended;
 }
 
 AuthoredLayer FogData::Unpack(const Layer& layer)
@@ -304,33 +357,23 @@ AuthoredLayer FogData::Unpack(const Layer& layer)
     return out;
 }
 
-int FogData::ConditionLayers(const Light& light, float halfMinuteOfDay, const LightParamsSelection& selection,
-                             AuthoredLayer* out) const
+FogData::ConditionFog FogData::LightConditionFog(const Light& light, float halfMinuteOfDay,
+                                                 const LightParamsSelection& selection) const
 {
     const int effectSlot = selection.screenEffectSlot;
     if (effectSlot >= 0 && effectSlot < kLightParamsSlots && light.paramsBySlot[effectSlot] != 0)
     {
         const Params* effect = FindParams(light.paramsBySlot[effectSlot]);
-        return effect ? InterpolateKeys(*effect, halfMinuteOfDay, out) : 0;
+        return effect ? InterpolateKeys(*effect, halfMinuteOfDay) : ConditionFog{};
     }
     const Params* clear = FindParams(light.paramsBySlot[kClearSlot]);
-    const int clearCount = clear ? InterpolateKeys(*clear, halfMinuteOfDay, out) : 0;
+    const ConditionFog clearFog = clear ? InterpolateKeys(*clear, halfMinuteOfDay) : ConditionFog{};
     const float storm = std::clamp(selection.stormBlend, 0.0f, 1.0f);
     if (storm <= 0.0f || light.paramsBySlot[kStormSlot] == 0)
-        return clearCount;
-
-    AuthoredLayer stormLayers[kMaxAuthoredLayers] = {};
+        return clearFog;
     const Params* stormParams = FindParams(light.paramsBySlot[kStormSlot]);
-    const int stormCount = stormParams ? InterpolateKeys(*stormParams, halfMinuteOfDay, stormLayers) : 0;
-    const int blendedCount = std::max(clearCount, stormCount);
-    for (int i = 0; i < blendedCount; ++i)
-    {
-        LayerBlend blend;
-        blend.Add(out[i], 1.0f - storm);
-        blend.Add(stormLayers[i], storm);
-        out[i] = blend.Result();
-    }
-    return blendedCount;
+    const ConditionFog stormFog = stormParams ? InterpolateKeys(*stormParams, halfMinuteOfDay) : ConditionFog{};
+    return BlendConditions(clearFog, stormFog, storm);
 }
 
 FogData::LightBlend FogData::BlendLights(int mapId, const float* position) const
@@ -410,21 +453,24 @@ bool FogData::Resolve(int mapId, const float* position, float dayFraction, const
 
     const float halfMinuteOfDay = std::fmod(std::max(dayFraction, 0.0f), 1.0f) * kHalfMinutesPerDay;
     LayerBlend layerBlends[kMaxAuthoredLayers];
+    DirectLightBlend directLight;
     for (int i = 0; i < blend.count; ++i)
     {
         const Light& light = *blend.lights[i].light;
         const float weight = blend.lights[i].weight / classicWeight;
-        AuthoredLayer layers[kMaxAuthoredLayers] = {};
-        const int layerCount = ConditionLayers(light, halfMinuteOfDay, selection, layers);
-        for (int j = 0; j < layerCount; ++j)
-            layerBlends[j].Add(layers[j], weight);
-        out.layerCount = std::max(out.layerCount, layerCount);
+        const ConditionFog fog = LightConditionFog(light, halfMinuteOfDay, selection);
+        for (int j = 0; j < fog.layerCount; ++j)
+            layerBlends[j].Add(fog.layers[j], weight);
+        directLight.Add(fog.directLight, fog.directLightPresence, weight);
+        out.layerCount = std::max(out.layerCount, fog.layerCount);
         out.lightIds[out.lightCount] = light.id;
         out.lightWeights[out.lightCount] = weight;
         ++out.lightCount;
     }
     for (int j = 0; j < out.layerCount; ++j)
         out.layers[j] = layerBlends[j].Result();
+    out.hasClassicDirectLight = directLight.Presence() > 0.0f;
+    directLight.Result(out.classicDirectLight);
     out.coverage = classicWeight;
     return true;
 }
